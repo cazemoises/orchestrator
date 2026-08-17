@@ -439,6 +439,10 @@ func (l *Loop) handleAccept(ctx context.Context, state *domain.RunState, taskID 
 		RepoDir:       l.Config.RepoDir,
 		CommitMessage: commitMessage,
 	})
+
+	// TODO: remover depois de confirmar que o ciclo completo accept->push funciona
+	writeDebugPushLog(taskID, pushRes, pushErr, l.Now())
+
 	_ = l.Store.AppendHistory(ctx, taskID, formatPushHistory(pushRes, pushErr, l.Now()))
 	if pushErr != nil {
 		return false, l.blockTask(ctx, state, taskID, fmt.Sprintf(
@@ -564,4 +568,38 @@ func writeDebugLastFailure(prompt, output string, now time.Time) {
 		return
 	}
 	_ = os.WriteFile(filepath.Join("data", "debug_last_failure.txt"), []byte(content), 0o644)
+}
+
+// TODO: remover depois de confirmar que o ciclo completo accept->push funciona
+//
+// writeDebugPushLog appends one line per CommitAndPush invocation to
+// data/debug_push_log.txt (append, not overwrite - the point is a trail
+// across the whole run), so a real run leaves an unambiguous record of
+// every push attempt and its outcome (added while investigating task-001
+// getting stuck with unpushed local commits - see the commit that added
+// this). Best-effort only: a failure to write here must never affect the
+// loop.
+func writeDebugPushLog(taskID string, res ports.PushResult, pushErr error, now time.Time) {
+	var outcome string
+	switch {
+	case pushErr != nil:
+		outcome = fmt.Sprintf("ERROR: %v", pushErr)
+	case res.Skipped:
+		outcome = "SKIPPED (no changes to commit)"
+	case res.Pushed:
+		outcome = fmt.Sprintf("PUSHED commit %s", res.CommitHash)
+	default:
+		outcome = fmt.Sprintf("UNEXPECTED result: %+v", res)
+	}
+	line := fmt.Sprintf("[%s] CommitAndPush task=%s -> %s\n", now.Format(time.RFC3339), taskID, outcome)
+
+	if err := os.MkdirAll("data", 0o755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join("data", "debug_push_log.txt"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString(line)
 }
