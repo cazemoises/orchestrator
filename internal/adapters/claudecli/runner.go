@@ -195,36 +195,38 @@ func (r *Runner) Run(ctx context.Context, req ports.RunRequest) (ports.RunResult
 		}, nil
 	}
 
-	var result ports.RunResult
 	env, err := parseEnvelope(stdout)
 	if err != nil {
-		result = ports.RunResult{
-			Success:  false,
-			Output:   stdout,
-			ErrorMsg: err.Error(),
-		}
-	} else {
-		result = ports.RunResult{
-			Output:      env.Result,
-			Success:     !env.IsError,
-			DurationSec: env.DurationMS / 1000,
-			NumTurns:    env.NumTurns,
-		}
-	}
-
-	// Defense in depth: RateLimitIndicators is a best-effort text match and
-	// will always be fragile to CLI wording changes (see the incident this
-	// guards against - the CLI's actual session-limit message didn't match
-	// any known marker, so it fell through to parseEnvelope, failed as
-	// invalid JSON, and got treated as a normal blocked-task decision
-	// instead of entering the wait/retry path). If the call didn't succeed,
-	// or the output contains no '{' at all (clearly not even an attempt at
-	// JSON), treat it as a possible rate limit/execution error out of
-	// caution, even though no known marker matched.
-	if !result.Success || !strings.Contains(combined, "{") {
+		// Defense in depth: RateLimitIndicators is a best-effort text match
+		// and will always be fragile to CLI wording changes (see the
+		// incident this guards against - the CLI's actual session-limit
+		// message didn't match any known marker, so it fell through to
+		// parseEnvelope, failed as invalid JSON, and got treated as a
+		// normal blocked-task decision instead of entering the wait/retry
+		// path). A response that fails to parse as the expected envelope,
+		// or contains no '{' at all (clearly not even an attempt at JSON),
+		// is treated as a possible rate limit out of caution, even though
+		// no known marker matched.
+		//
+		// This must NOT extend to a response that parses successfully with
+		// is_error:true: that is a genuine, well-formed execution/code
+		// failure, not a rate limit - unlike a rate limit it will never
+		// resolve itself by waiting, so it has to surface as a normal
+		// Success=false failure and go through the existing reject/block
+		// flow instead of waiting forever.
 		log.Printf("claudecli: possível rate limit não reconhecido pelos markers conhecidos, tratando como tal por precaução: %s", combined)
-		result.RateLimited = true
+		return ports.RunResult{
+			RateLimited: true,
+			Success:     false,
+			Output:      stdout,
+			ErrorMsg:    err.Error(),
+		}, nil
 	}
 
-	return result, nil
+	return ports.RunResult{
+		Output:      env.Result,
+		Success:     !env.IsError,
+		DurationSec: env.DurationMS / 1000,
+		NumTurns:    env.NumTurns,
+	}, nil
 }

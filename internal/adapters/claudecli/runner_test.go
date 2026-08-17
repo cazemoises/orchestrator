@@ -182,6 +182,14 @@ func TestRun_MarksIsErrorAsUnsuccessful(t *testing.T) {
 	if res.Success {
 		t.Fatalf("got Success=true, want false for is_error envelope")
 	}
+	// A well-formed envelope reporting a genuine execution/code failure is
+	// not a rate limit: unlike a rate limit, it never resolves itself by
+	// waiting, so it must NOT be routed into the wait/retry fallback - it
+	// has to surface as a normal Success=false failure so the existing
+	// reject/block flow handles it.
+	if res.RateLimited {
+		t.Fatalf("got RateLimited=true, want false: a valid is_error:true envelope is a real failure, not a rate limit")
+	}
 }
 
 func TestRun_DetectsRateLimitFromStderrBeforeParsing(t *testing.T) {
@@ -210,6 +218,9 @@ func TestRun_ReturnsFailedResultOnUnparsableOutput(t *testing.T) {
 	}
 	if res.ErrorMsg == "" {
 		t.Fatalf("expected ErrorMsg to explain the parse failure")
+	}
+	if !res.RateLimited {
+		t.Fatalf("got RateLimited=false, want true: unparsable output with no '{' is a fallback candidate")
 	}
 }
 
