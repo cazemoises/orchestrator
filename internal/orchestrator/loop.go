@@ -45,6 +45,12 @@ func (c *Config) applyDefaults() {
 	if c.MaxAttemptsPerTask == 0 {
 		c.MaxAttemptsPerTask = 3
 	}
+	if len(c.DevAllowedTools) == 0 {
+		// Write is required, not optional: without it the Dev agent can only
+		// edit files that already exist, which breaks any task that starts
+		// from scratch (e.g. creating the first domain entities).
+		c.DevAllowedTools = []string{"Read", "Edit", "Write", "Bash"}
+	}
 	if c.DevMaxTurns == 0 {
 		c.DevMaxTurns = 30
 	}

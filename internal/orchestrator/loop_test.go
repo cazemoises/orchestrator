@@ -46,6 +46,31 @@ func TestComputeWait_MidRoundReturnsRemainder(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
+// Config.applyDefaults
+// ---------------------------------------------------------------------
+
+func TestApplyDefaults_DefaultsDevAllowedToolsWhenEmpty(t *testing.T) {
+	cfg := Config{}
+	cfg.applyDefaults()
+
+	joined := strings.Join(cfg.DevAllowedTools, ",")
+	for _, want := range []string{"Read", "Edit", "Write", "Bash"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("default DevAllowedTools %v missing %q", cfg.DevAllowedTools, want)
+		}
+	}
+}
+
+func TestApplyDefaults_DoesNotOverrideExplicitDevAllowedTools(t *testing.T) {
+	cfg := Config{DevAllowedTools: []string{"Bash"}}
+	cfg.applyDefaults()
+
+	if len(cfg.DevAllowedTools) != 1 || cfg.DevAllowedTools[0] != "Bash" {
+		t.Fatalf("got %v, want explicit DevAllowedTools left untouched", cfg.DevAllowedTools)
+	}
+}
+
+// ---------------------------------------------------------------------
 // test fakes
 // ---------------------------------------------------------------------
 
