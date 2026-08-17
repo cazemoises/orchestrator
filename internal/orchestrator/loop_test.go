@@ -46,6 +46,34 @@ func TestComputeWait_MidRoundReturnsRemainder(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
+// buildVerifyCommand (portable shell selection for LocalVerifyCommand)
+// ---------------------------------------------------------------------
+
+func TestBuildVerifyCommand_UsesCmdOnWindows(t *testing.T) {
+	cmd := buildVerifyCommand(context.Background(), "windows", "go build ./...")
+	want := []string{"cmd", "/C", "go build ./..."}
+	if strings.Join(cmd.Args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("got args %v, want %v", cmd.Args, want)
+	}
+}
+
+func TestBuildVerifyCommand_UsesShOnLinux(t *testing.T) {
+	cmd := buildVerifyCommand(context.Background(), "linux", "go build ./...")
+	want := []string{"sh", "-c", "go build ./..."}
+	if strings.Join(cmd.Args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("got args %v, want %v", cmd.Args, want)
+	}
+}
+
+func TestBuildVerifyCommand_UsesShOnDarwin(t *testing.T) {
+	cmd := buildVerifyCommand(context.Background(), "darwin", "go build ./...")
+	want := []string{"sh", "-c", "go build ./..."}
+	if strings.Join(cmd.Args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("got args %v, want %v", cmd.Args, want)
+	}
+}
+
+// ---------------------------------------------------------------------
 // Config.applyDefaults
 // ---------------------------------------------------------------------
 

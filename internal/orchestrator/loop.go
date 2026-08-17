@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -106,11 +107,24 @@ func realSleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
+// buildVerifyCommand picks the right shell for LocalVerifyCommand based on
+// goos (passed explicitly, never read from runtime.GOOS internally, so
+// tests can exercise both branches on one machine). On Windows, `sh` is
+// frequently not on PATH even with Git for Windows installed (only
+// Git\cmd, not Git\bin, ends up there by default) - cmd.exe is always
+// present, so that's what we use there instead.
+func buildVerifyCommand(ctx context.Context, goos, command string) *exec.Cmd {
+	if goos == "windows" {
+		return exec.CommandContext(ctx, "cmd", "/C", command)
+	}
+	return exec.CommandContext(ctx, "sh", "-c", command)
+}
+
 // realVerify runs command through a shell in dir - used to sanity-check the
 // repo (e.g. "go build ./... && go vet ./...") before the loop ever commits
 // and pushes code produced by the Dev agent.
 func realVerify(ctx context.Context, dir, command string) (string, string, error) {
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd := buildVerifyCommand(ctx, runtime.GOOS, command)
 	cmd.Dir = dir
 
 	var stdout, stderr strings.Builder
