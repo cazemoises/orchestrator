@@ -8,7 +8,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -260,6 +262,9 @@ func (l *Loop) stepPODecide(ctx context.Context, state *domain.RunState) error {
 
 	decision, err := parsePODecision(res.Output)
 	if err != nil {
+		// TODO: remover depois de diagnosticar o problema de parse do PO
+		writeDebugLastFailure(req.Prompt, res.Output, l.Now())
+
 		_ = l.Notifier.Notify(ctx, fmt.Sprintf("PO decision could not be parsed, blocking: %v", err))
 		state.Phase = domain.PhaseBlocked
 		return l.checkpoint(ctx, state)
@@ -532,4 +537,20 @@ func parsePOEvaluation(raw string) (domain.POEvaluation, error) {
 		return domain.POEvaluation{}, err
 	}
 	return e, nil
+}
+
+// TODO: remover depois de diagnosticar o problema de parse do PO
+//
+// writeDebugLastFailure dumps the prompt and raw output of a failed PO
+// decision parse to data/debug_last_failure.txt, overwriting it each time.
+// Best-effort only: a failure to write here must never affect the loop.
+func writeDebugLastFailure(prompt, output string, now time.Time) {
+	content := fmt.Sprintf(
+		"timestamp: %s\n\n--- prompt ---\n%s\n\n--- raw output ---\n%s\n",
+		now.Format(time.RFC3339), prompt, output)
+
+	if err := os.MkdirAll("data", 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join("data", "debug_last_failure.txt"), []byte(content), 0o644)
 }
