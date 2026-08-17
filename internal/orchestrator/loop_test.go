@@ -130,6 +130,23 @@ func (n *fakeNotifier) Notify(ctx context.Context, message string) error {
 
 var _ ports.Notifier = (*fakeNotifier)(nil)
 
+type fakePusher struct {
+	calls  []ports.PushRequest
+	result ports.PushResult
+	err    error
+}
+
+func (p *fakePusher) CommitAndPush(ctx context.Context, req ports.PushRequest) (ports.PushResult, error) {
+	p.calls = append(p.calls, req)
+	return p.result, p.err
+}
+
+var _ ports.GitPusher = (*fakePusher)(nil)
+
+func newSuccessPusher() *fakePusher {
+	return &fakePusher{result: ports.PushResult{Pushed: true, CommitHash: "abc123"}}
+}
+
 func testConfig() Config {
 	return Config{
 		RepoDir:            "/repo",
@@ -143,8 +160,8 @@ func testConfig() Config {
 	}
 }
 
-func newTestLoop(agent ports.AgentRunner, store ports.MemoryStore, notifier ports.Notifier, cfg Config) *Loop {
-	l := New(agent, store, notifier, cfg)
+func newTestLoop(agent ports.AgentRunner, store ports.MemoryStore, notifier ports.Notifier, pusher ports.GitPusher, cfg Config) *Loop {
+	l := New(agent, store, notifier, pusher, cfg)
 	l.Now = func() time.Time { return time.Unix(1700000000, 0) }
 	l.Sleep = func(ctx context.Context, d time.Duration) error { return nil }
 	return l
@@ -176,7 +193,8 @@ func TestRun_HappyPath_AcceptsTaskThenReportsProductDone(t *testing.T) {
 		}
 	}
 
-	loop := newTestLoop(agent, store, notifier, testConfig())
+	pusher := newSuccessPusher()
+	loop := newTestLoop(agent, store, notifier, pusher, testConfig())
 	if err := loop.Run(context.Background()); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -202,6 +220,15 @@ func TestRun_HappyPath_AcceptsTaskThenReportsProductDone(t *testing.T) {
 	if len(store.history["t1"]) == 0 {
 		t.Fatal("expected a history entry to be recorded for t1")
 	}
+	if len(pusher.calls) != 1 {
+		t.Fatalf("got %d push calls, want exactly 1 (after the accept)", len(pusher.calls))
+	}
+	if pusher.calls[0].RepoDir != testConfig().RepoDir {
+		t.Fatalf("push RepoDir = %q, want %q", pusher.calls[0].RepoDir, testConfig().RepoDir)
+	}
+	if !strings.Contains(pusher.calls[0].CommitMessage, "First task") || !strings.Contains(pusher.calls[0].CommitMessage, "tests pass") {
+		t.Fatalf("commit message = %q, want it to include the task title and PO reasoning", pusher.calls[0].CommitMessage)
+	}
 }
 
 func TestRun_MarksTaskInProgressWhenDevStarts(t *testing.T) {
@@ -221,7 +248,7 @@ func TestRun_MarksTaskInProgressWhenDevStarts(t *testing.T) {
 		}
 	}
 
-	loop := newTestLoop(agent, store, notifier, testConfig())
+	loop := newTestLoop(agent, store, notifier, newSuccessPusher(), testConfig())
 	_ = loop.Run(context.Background())
 
 	if len(store.backlogSnaps) == 0 {
@@ -259,7 +286,7 @@ func TestRun_RejectUsesCorrectionPromptForNextDevCall(t *testing.T) {
 		}
 	}
 
-	loop := newTestLoop(agent, store, notifier, testConfig())
+	loop := newTestLoop(agent, store, notifier, newSuccessPusher(), testConfig())
 	if err := loop.Run(context.Background()); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -298,7 +325,7 @@ func TestRun_RejectUntilMaxAttempts_BlocksTaskAndStops(t *testing.T) {
 		}
 	}
 
-	loop := newTestLoop(agent, store, notifier, cfg)
+	loop := newTestLoop(agent, store, notifier, newSuccessPusher(), cfg)
 	if err := loop.Run(context.Background()); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -337,7 +364,7 @@ func TestRun_BlockVerdict_StopsImmediately(t *testing.T) {
 		}
 	}
 
-	loop := newTestLoop(agent, store, notifier, testConfig())
+	loop := newTestLoop(agent, store, notifier, newSuccessPusher(), testConfig())
 	if err := loop.Run(context.Background()); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -350,6 +377,117 @@ func TestRun_BlockVerdict_StopsImmediately(t *testing.T) {
 	}
 	if len(notifier.messages) == 0 {
 		t.Fatal("expected a notification on block verdict")
+	}
+}
+
+// ---------------------------------------------------------------------
+// guardrails: local verify + git push on accept
+// ---------------------------------------------------------------------
+
+func TestRun_AcceptWithFailingLocalVerify_AutoRejectsWithoutCallingPOAgain(t *testing.T) {
+	store := newFakeStore(nil)
+	store.backlog = []domain.Task{{ID: "t1", Title: "First task", Status: domain.TaskStatusPending}}
+	notifier := &fakeNotifier{}
+	pusher := newSuccessPusher()
+
+	agent := &fakeAgent{}
+	agent.respond = func(idx int, req ports.RunRequest) (ports.RunResult, error) {
+		switch idx {
+		case 0:
+			return ports.RunResult{Output: `{"action":"next_task","task_id":"t1","dev_prompt":"p1"}`}, nil
+		case 1:
+			return ports.RunResult{Output: "impl1", Success: true}, nil
+		case 2:
+			return ports.RunResult{Output: `{"verdict":"accept","reasoning":"looks good"}`}, nil
+		case 3:
+			// This must be the retried DEV call (using our own deterministic
+			// correction prompt), NOT another PO call - proves the
+			// auto-reject never asked the PO anything.
+			if req.Prompt == "p1" {
+				t.Fatalf("dev call #%d reused the original prompt %q; want the auto-generated verify-failure correction prompt", idx, req.Prompt)
+			}
+			return ports.RunResult{Output: "impl2", Success: true}, nil
+		case 4:
+			return ports.RunResult{Output: `{"verdict":"accept","reasoning":"looks good now"}`}, nil
+		case 5:
+			return ports.RunResult{Output: `{"action":"product_done","reasoning":"done"}`}, nil
+		default:
+			t.Fatalf("unexpected agent call #%d: %+v", idx, req)
+			return ports.RunResult{}, nil
+		}
+	}
+
+	cfg := testConfig()
+	cfg.LocalVerifyCommand = "go build ./..."
+	loop := newTestLoop(agent, store, notifier, pusher, cfg)
+
+	verifyCalls := 0
+	loop.Verify = func(ctx context.Context, dir, command string) (string, string, error) {
+		verifyCalls++
+		if verifyCalls == 1 {
+			return "", "# pkg\n./main.go:1:1: syntax error", fmt.Errorf("exit status 1")
+		}
+		return "ok", "", nil
+	}
+
+	if err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if store.runState.Phase != domain.PhaseDone {
+		t.Fatalf("got phase %q, want done", store.runState.Phase)
+	}
+	if verifyCalls != 2 {
+		t.Fatalf("got %d verify calls, want 2 (failed retry, then succeeded)", verifyCalls)
+	}
+	if len(agent.calls) != 6 {
+		t.Fatalf("got %d agent calls, want exactly 6 (no extra PO call for the auto-reject)", len(agent.calls))
+	}
+	if !strings.Contains(agent.calls[3].Prompt, "syntax error") {
+		t.Fatalf("retry dev prompt = %q, want it to include the verify failure output", agent.calls[3].Prompt)
+	}
+	if len(pusher.calls) != 1 {
+		t.Fatalf("got %d push calls, want exactly 1 (only after verify passed)", len(pusher.calls))
+	}
+}
+
+func TestRun_AcceptWithFailingPush_BlocksTask(t *testing.T) {
+	store := newFakeStore(nil)
+	store.backlog = []domain.Task{{ID: "t1", Title: "First task", Status: domain.TaskStatusPending}}
+	notifier := &fakeNotifier{}
+	pusher := &fakePusher{err: fmt.Errorf("gitcli: git push origin main failed: exit status 1 (stderr: ! [remote rejected] main -> main (protected branch))")}
+
+	agent := &fakeAgent{}
+	agent.respond = func(idx int, req ports.RunRequest) (ports.RunResult, error) {
+		switch idx {
+		case 0:
+			return ports.RunResult{Output: `{"action":"next_task","task_id":"t1","dev_prompt":"p1"}`}, nil
+		case 1:
+			return ports.RunResult{Output: "impl1", Success: true}, nil
+		case 2:
+			return ports.RunResult{Output: `{"verdict":"accept","reasoning":"ship it"}`}, nil
+		default:
+			t.Fatalf("unexpected agent call #%d: loop should have blocked after the failed push", idx)
+			return ports.RunResult{}, nil
+		}
+	}
+
+	loop := newTestLoop(agent, store, notifier, pusher, testConfig())
+	if err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if store.runState.Phase != domain.PhaseBlocked {
+		t.Fatalf("got phase %q, want blocked", store.runState.Phase)
+	}
+	if store.backlog[0].Status != domain.TaskStatusBlocked {
+		t.Fatalf("got status %q, want blocked", store.backlog[0].Status)
+	}
+	if len(pusher.calls) != 1 {
+		t.Fatalf("got %d push calls, want exactly 1", len(pusher.calls))
+	}
+	if len(notifier.messages) == 0 || !strings.Contains(notifier.messages[len(notifier.messages)-1], "protected branch") {
+		t.Fatalf("got messages %v, want the last one to include the git push error", notifier.messages)
 	}
 }
 
@@ -380,7 +518,7 @@ func TestRun_ChecksPointBeforeCallingDevAgent(t *testing.T) {
 		}
 	}
 
-	loop := newTestLoop(agent, store, notifier, testConfig())
+	loop := newTestLoop(agent, store, notifier, newSuccessPusher(), testConfig())
 	if err := loop.Run(context.Background()); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -429,7 +567,7 @@ func TestRun_RateLimited_NotifiesSleepsThenRetriesSameCall(t *testing.T) {
 	}
 
 	var sleptFor []time.Duration
-	loop := newTestLoop(agent, store, notifier, testConfig())
+	loop := newTestLoop(agent, store, notifier, newSuccessPusher(), testConfig())
 	loop.Sleep = func(ctx context.Context, d time.Duration) error {
 		sleptFor = append(sleptFor, d)
 		return nil
@@ -478,7 +616,7 @@ func TestRun_RateLimitResume_ComputesRemainingWaitFromExistingTimestamp(t *testi
 	}
 
 	var sleptFor []time.Duration
-	loop := New(agent, store, notifier, testConfig())
+	loop := New(agent, store, notifier, newSuccessPusher(), testConfig())
 	loop.Now = func() time.Time { return fixedNow }
 	loop.Sleep = func(ctx context.Context, d time.Duration) error {
 		sleptFor = append(sleptFor, d)

@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
+	"strings"
 	"time"
 
 	"orchestrator/internal/domain"
@@ -25,6 +27,16 @@ type Config struct {
 	DevModel           string
 	RateLimitWaitMin   time.Duration
 	RateLimitWaitMax   time.Duration
+
+	// LocalVerifyCommand runs (via `sh -c`, in RepoDir) right before a
+	// commit+push, after the PO accepts a task. Empty skips verification
+	// entirely (not recommended, but configurable). Example:
+	// "go build ./... && go vet ./...".
+	LocalVerifyCommand string
+
+	// GitCommitPrefix prefixes the generated commit message. Defaults to
+	// "feat: ".
+	GitCommitPrefix string
 }
 
 func (c *Config) applyDefaults() {
@@ -40,6 +52,9 @@ func (c *Config) applyDefaults() {
 	if c.RateLimitWaitMax == 0 {
 		c.RateLimitWaitMax = 90 * time.Minute
 	}
+	if c.GitCommitPrefix == "" {
+		c.GitCommitPrefix = "feat: "
+	}
 }
 
 // Loop is the PO/Dev state machine.
@@ -47,24 +62,28 @@ type Loop struct {
 	Agent    ports.AgentRunner
 	Store    ports.MemoryStore
 	Notifier ports.Notifier
+	Pusher   ports.GitPusher
 	Config   Config
 
-	// Now and Sleep are seams for testing; production code leaves them at
-	// their New()-assigned defaults.
-	Now   func() time.Time
-	Sleep func(ctx context.Context, d time.Duration) error
+	// Now, Sleep and Verify are seams for testing; production code leaves
+	// them at their New()-assigned defaults.
+	Now    func() time.Time
+	Sleep  func(ctx context.Context, d time.Duration) error
+	Verify func(ctx context.Context, dir, command string) (stdout, stderr string, err error)
 }
 
-// New creates a Loop with defaults applied to Config and real time/sleep.
-func New(agent ports.AgentRunner, store ports.MemoryStore, notifier ports.Notifier, cfg Config) *Loop {
+// New creates a Loop with defaults applied to Config and real time/sleep/verify.
+func New(agent ports.AgentRunner, store ports.MemoryStore, notifier ports.Notifier, pusher ports.GitPusher, cfg Config) *Loop {
 	cfg.applyDefaults()
 	return &Loop{
 		Agent:    agent,
 		Store:    store,
 		Notifier: notifier,
+		Pusher:   pusher,
 		Config:   cfg,
 		Now:      time.Now,
 		Sleep:    realSleep,
+		Verify:   realVerify,
 	}
 }
 
@@ -77,6 +96,21 @@ func realSleep(ctx context.Context, d time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// realVerify runs command through a shell in dir - used to sanity-check the
+// repo (e.g. "go build ./... && go vet ./...") before the loop ever commits
+// and pushes code produced by the Dev agent.
+func realVerify(ctx context.Context, dir, command string) (string, string, error) {
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd.Dir = dir
+
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
 }
 
 // computeWait implements the resumable exponential backoff: given how much
@@ -333,21 +367,7 @@ func (l *Loop) stepPOEvaluate(ctx context.Context, state *domain.RunState) (bool
 
 	switch evaluation.Verdict {
 	case "accept":
-		tasks, err := l.Store.ReadBacklog(ctx)
-		if err != nil {
-			return false, err
-		}
-		if err := markTaskStatus(tasks, taskID, domain.TaskStatusDone, l.Now()); err == nil {
-			if err := l.Store.WriteBacklog(ctx, tasks); err != nil {
-				return false, err
-			}
-		}
-		state.Phase = domain.PhasePODeciding
-		state.CurrentTaskID = ""
-		state.CurrentDevPrompt = ""
-		state.AttemptsOnTask = 0
-		state.LastDevReport = nil
-		return true, l.checkpoint(ctx, state)
+		return l.handleAccept(ctx, state, taskID, evaluation)
 
 	case "reject":
 		state.AttemptsOnTask++
@@ -368,6 +388,97 @@ func (l *Loop) stepPOEvaluate(ctx context.Context, state *domain.RunState) (bool
 		return false, l.blockTask(ctx, state, taskID, fmt.Sprintf(
 			"Task %s blocked: PO returned unknown verdict %q", taskID, evaluation.Verdict))
 	}
+}
+
+// handleAccept runs the guardrails between a PO "accept" verdict and
+// actually completing the task: a local sanity check (if configured), then
+// a commit+push - the only path by which code reaches the CI/CD pipeline
+// now that the orchestrator runs locally instead of on the VM. A failing
+// verify is treated as an automatic reject (no extra PO call, deterministic
+// correction prompt); a failing push blocks the task for human intervention
+// - git conflicts and rejected pushes are not something the loop tries to
+// resolve on its own.
+func (l *Loop) handleAccept(ctx context.Context, state *domain.RunState, taskID string, evaluation domain.POEvaluation) (bool, error) {
+	tasks, err := l.Store.ReadBacklog(ctx)
+	if err != nil {
+		return false, err
+	}
+	taskTitle := taskID
+	for _, task := range tasks {
+		if task.ID == taskID {
+			taskTitle = task.Title
+			break
+		}
+	}
+
+	if l.Config.LocalVerifyCommand != "" {
+		stdout, stderr, verifyErr := l.Verify(ctx, l.Config.RepoDir, l.Config.LocalVerifyCommand)
+		if verifyErr != nil {
+			return false, l.autoRejectFromVerifyFailure(ctx, state, taskID, stdout, stderr, verifyErr)
+		}
+	}
+
+	commitMessage := fmt.Sprintf("%s%s\n\n%s", l.Config.GitCommitPrefix, taskTitle, evaluation.Reasoning)
+	pushRes, pushErr := l.Pusher.CommitAndPush(ctx, ports.PushRequest{
+		RepoDir:       l.Config.RepoDir,
+		CommitMessage: commitMessage,
+	})
+	_ = l.Store.AppendHistory(ctx, taskID, formatPushHistory(pushRes, pushErr, l.Now()))
+	if pushErr != nil {
+		return false, l.blockTask(ctx, state, taskID, fmt.Sprintf(
+			"Task %s was accepted but git push failed - needs human intervention (merge conflict, protected branch, or missing credentials): %v",
+			taskID, pushErr))
+	}
+
+	if err := markTaskStatus(tasks, taskID, domain.TaskStatusDone, l.Now()); err == nil {
+		if err := l.Store.WriteBacklog(ctx, tasks); err != nil {
+			return false, err
+		}
+	}
+	state.Phase = domain.PhasePODeciding
+	state.CurrentTaskID = ""
+	state.CurrentDevPrompt = ""
+	state.AttemptsOnTask = 0
+	state.LastDevReport = nil
+	return true, l.checkpoint(ctx, state)
+}
+
+// autoRejectFromVerifyFailure mirrors the PO's own reject handling
+// (AttemptsOnTask / correction_prompt / eventual block) but is triggered
+// deterministically by a failing LocalVerifyCommand, without spending an
+// extra PO call on a decision the command's exit code already answered.
+func (l *Loop) autoRejectFromVerifyFailure(ctx context.Context, state *domain.RunState, taskID, stdout, stderr string, verifyErr error) error {
+	state.AttemptsOnTask++
+
+	correction := fmt.Sprintf(
+		"Automated local verification failed before this task could be committed and pushed. "+
+			"Fix the underlying problem - do not just work around the check.\n\n"+
+			"Command: %s\n\nError: %v\n\nstdout:\n%s\n\nstderr:\n%s\n",
+		l.Config.LocalVerifyCommand, verifyErr, stdout, stderr)
+
+	_ = l.Store.AppendHistory(ctx, taskID, fmt.Sprintf(
+		"## %s\n\n- verdict: reject (automatic - local verify failed)\n- attempts_on_task: %d\n- command: %s\n\n",
+		l.Now().Format(time.RFC3339), state.AttemptsOnTask, l.Config.LocalVerifyCommand))
+
+	if state.AttemptsOnTask >= l.Config.MaxAttemptsPerTask {
+		return l.blockTask(ctx, state, taskID, fmt.Sprintf(
+			"Task %s blocked after %d attempts (last failure: automated local verification command %q).",
+			taskID, state.AttemptsOnTask, l.Config.LocalVerifyCommand))
+	}
+
+	state.CurrentDevPrompt = correction
+	state.Phase = domain.PhaseDevPending
+	return l.checkpoint(ctx, state)
+}
+
+func formatPushHistory(res ports.PushResult, err error, now time.Time) string {
+	if err != nil {
+		return fmt.Sprintf("## %s\n\n- push: FAILED\n- error: %v\n\n", now.Format(time.RFC3339), err)
+	}
+	if res.Skipped {
+		return fmt.Sprintf("## %s\n\n- push: skipped (no changes to commit)\n\n", now.Format(time.RFC3339))
+	}
+	return fmt.Sprintf("## %s\n\n- push: pushed commit %s\n\n", now.Format(time.RFC3339), res.CommitHash)
 }
 
 func (l *Loop) blockTask(ctx context.Context, state *domain.RunState, taskID, message string) error {
