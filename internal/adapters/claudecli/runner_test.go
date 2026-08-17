@@ -34,6 +34,13 @@ func TestIsRateLimited_ReturnsFalseForOrdinaryOutput(t *testing.T) {
 	}
 }
 
+func TestIsRateLimited_DetectsRealSessionLimitMessage(t *testing.T) {
+	msg := "You've hit your session limit · resets 2:30am (America/Sao_Paulo)"
+	if !isRateLimited(msg) {
+		t.Fatalf("isRateLimited(%q) = false, want true", msg)
+	}
+}
+
 // --- buildArgs -----------------------------------------------------------
 
 func TestBuildArgs_IncludesOutputFormat(t *testing.T) {
@@ -203,6 +210,62 @@ func TestRun_ReturnsFailedResultOnUnparsableOutput(t *testing.T) {
 	}
 	if res.ErrorMsg == "" {
 		t.Fatalf("expected ErrorMsg to explain the parse failure")
+	}
+}
+
+// TestRun_DetectsRealSessionLimitMessageAsRateLimited reproduces the actual
+// bug: the CLI's current session-limit wording wasn't in RateLimitIndicators,
+// so it fell through to parseEnvelope, failed as invalid JSON, and the
+// orchestrator treated the rate limit as a normal parse failure instead of
+// entering the wait/retry path.
+func TestRun_DetectsRealSessionLimitMessageAsRateLimited(t *testing.T) {
+	fe := &fakeExec{stdout: "You've hit your session limit · resets 2:30am (America/Sao_Paulo)"}
+	r := &Runner{exec: fe.run, maxTurnsSupported: boolPtr(true)}
+
+	res, err := r.Run(context.Background(), ports.RunRequest{Prompt: "x"})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if !res.RateLimited {
+		t.Fatalf("got RateLimited=false, want true for real session limit message")
+	}
+}
+
+// TestRun_UnrecognizedNonJSONOutputFallsBackToRateLimited exercises the
+// defense-in-depth layer: a future CLI wording change that matches none of
+// the known markers must still be treated as a possible rate limit, not
+// silently misparsed as a normal decision, as long as the output contains
+// no '{' at all (i.e. it is clearly not even an attempt at JSON).
+func TestRun_UnrecognizedNonJSONOutputFallsBackToRateLimited(t *testing.T) {
+	fe := &fakeExec{stdout: "Sorry, you'll need to wait a bit before continuing."}
+	r := &Runner{exec: fe.run, maxTurnsSupported: boolPtr(true)}
+
+	res, err := r.Run(context.Background(), ports.RunRequest{Prompt: "x"})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if !res.RateLimited {
+		t.Fatalf("got RateLimited=false, want true for unrecognized non-JSON output (fallback heuristic)")
+	}
+}
+
+// TestRun_ValidSuccessfulJSONNotAffectedByFallbackHeuristic guards against
+// the fallback heuristic above from misfiring on normal, well-formed
+// successful envelopes: Success=true and the output does contain '{', so
+// neither leg of the fallback OR condition should fire.
+func TestRun_ValidSuccessfulJSONNotAffectedByFallbackHeuristic(t *testing.T) {
+	fe := &fakeExec{stdout: `{"result": "42", "is_error": false, "num_turns": 2, "duration_ms": 1000}`}
+	r := &Runner{exec: fe.run, maxTurnsSupported: boolPtr(true)}
+
+	res, err := r.Run(context.Background(), ports.RunRequest{Prompt: "x"})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if res.RateLimited {
+		t.Fatalf("got RateLimited=true, want false for a normal valid JSON success envelope")
+	}
+	if !res.Success || res.Output != "42" {
+		t.Fatalf("got %+v, want unaffected successful parsed result", res)
 	}
 }
 

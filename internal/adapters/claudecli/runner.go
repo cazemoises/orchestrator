@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -32,6 +33,8 @@ var RateLimitIndicators = []string{
 	"quota exceeded",
 	"try again later",
 	"limit reached",
+	"session limit",
+	"hit your",
 }
 
 func isRateLimited(combinedOutput string) bool {
@@ -183,7 +186,8 @@ func (r *Runner) Run(ctx context.Context, req ports.RunRequest) (ports.RunResult
 		return ports.RunResult{}, fmt.Errorf("claudecli: running claude: %w", err)
 	}
 
-	if isRateLimited(stdout + "\n" + stderr) {
+	combined := stdout + "\n" + stderr
+	if isRateLimited(combined) {
 		return ports.RunResult{
 			RateLimited: true,
 			Output:      stdout,
@@ -191,19 +195,36 @@ func (r *Runner) Run(ctx context.Context, req ports.RunRequest) (ports.RunResult
 		}, nil
 	}
 
+	var result ports.RunResult
 	env, err := parseEnvelope(stdout)
 	if err != nil {
-		return ports.RunResult{
+		result = ports.RunResult{
 			Success:  false,
 			Output:   stdout,
 			ErrorMsg: err.Error(),
-		}, nil
+		}
+	} else {
+		result = ports.RunResult{
+			Output:      env.Result,
+			Success:     !env.IsError,
+			DurationSec: env.DurationMS / 1000,
+			NumTurns:    env.NumTurns,
+		}
 	}
 
-	return ports.RunResult{
-		Output:      env.Result,
-		Success:     !env.IsError,
-		DurationSec: env.DurationMS / 1000,
-		NumTurns:    env.NumTurns,
-	}, nil
+	// Defense in depth: RateLimitIndicators is a best-effort text match and
+	// will always be fragile to CLI wording changes (see the incident this
+	// guards against - the CLI's actual session-limit message didn't match
+	// any known marker, so it fell through to parseEnvelope, failed as
+	// invalid JSON, and got treated as a normal blocked-task decision
+	// instead of entering the wait/retry path). If the call didn't succeed,
+	// or the output contains no '{' at all (clearly not even an attempt at
+	// JSON), treat it as a possible rate limit/execution error out of
+	// caution, even though no known marker matched.
+	if !result.Success || !strings.Contains(combined, "{") {
+		log.Printf("claudecli: possível rate limit não reconhecido pelos markers conhecidos, tratando como tal por precaução: %s", combined)
+		result.RateLimited = true
+	}
+
+	return result, nil
 }
