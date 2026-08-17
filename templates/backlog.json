@@ -1,0 +1,11 @@
+[
+  {
+    "id": "example-1",
+    "title": "Substitua isto pela primeira task real do backlog",
+    "description": "Descrição objetiva do que precisa ser feito e do critério de aceite. Apague esta task de exemplo antes do primeiro ciclo.",
+    "status": "pending",
+    "attempts": 0,
+    "created_at": "2026-01-01T00:00:00Z",
+    "updated_at": "2026-01-01T00:00:00Z"
+  }
+]
