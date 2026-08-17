@@ -82,3 +82,57 @@ func TestExtractJSON_ReturnsErrorWhenNoJSONPresent(t *testing.T) {
 		t.Fatal("expected error when no JSON object is present")
 	}
 }
+
+// --- loose/unquoted-key normalization ---------------------------------
+
+func TestExtractJSON_QuotesSimpleUnquotedKey(t *testing.T) {
+	got, err := extractJSON(`{ok: true}`)
+	if err != nil {
+		t.Fatalf("extractJSON returned error: %v", err)
+	}
+	if got != `{"ok": true}` {
+		t.Fatalf("got %q, want %q", got, `{"ok": true}`)
+	}
+}
+
+func TestExtractJSON_QuotesUnquotedKeysInNestedObjects(t *testing.T) {
+	got, err := extractJSON(`{outer: {inner: 1}}`)
+	if err != nil {
+		t.Fatalf("extractJSON returned error: %v", err)
+	}
+	if got != `{"outer": {"inner": 1}}` {
+		t.Fatalf("got %q, want %q", got, `{"outer": {"inner": 1}}`)
+	}
+}
+
+func TestExtractJSON_QuotesOnlyTheUnquotedKeysInMixedObject(t *testing.T) {
+	got, err := extractJSON(`{"a": 1, b: 2}`)
+	if err != nil {
+		t.Fatalf("extractJSON returned error: %v", err)
+	}
+	if got != `{"a": 1, "b": 2}` {
+		t.Fatalf("got %q, want %q", got, `{"a": 1, "b": 2}`)
+	}
+}
+
+func TestExtractJSON_AlreadyValidJSONIsReturnedUnmodified(t *testing.T) {
+	raw := `{"a": 1, "b": 2}`
+	got, err := extractJSON(raw)
+	if err != nil {
+		t.Fatalf("extractJSON returned error: %v", err)
+	}
+	if got != raw {
+		t.Fatalf("got %q, want the input returned byte-for-byte unmodified: %q", got, raw)
+	}
+}
+
+func TestExtractJSON_LoosePODecisionParsesAfterNormalization(t *testing.T) {
+	raw := `{action: "next_task", task_id: "t1", dev_prompt: "do it", reasoning: "because"}`
+	decision, err := parsePODecision(raw)
+	if err != nil {
+		t.Fatalf("parsePODecision returned error: %v", err)
+	}
+	if decision.Action != "next_task" || decision.TaskID != "t1" || decision.DevPrompt != "do it" || decision.Reasoning != "because" {
+		t.Fatalf("got %+v, want fully parsed decision", decision)
+	}
+}
