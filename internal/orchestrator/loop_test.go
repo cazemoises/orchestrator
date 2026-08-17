@@ -516,6 +516,100 @@ func TestRun_AcceptWithFailingPush_BlocksTask(t *testing.T) {
 	}
 }
 
+// TestRun_AcceptWithNoVerifyConfigured_StillCallsPush guards against a
+// regression where an empty LocalVerifyCommand (verification skipped, as
+// documented) accidentally skips the push too. They are independent: empty
+// LocalVerifyCommand must still always reach CommitAndPush.
+func TestRun_AcceptWithNoVerifyConfigured_StillCallsPush(t *testing.T) {
+	store := newFakeStore(nil)
+	store.backlog = []domain.Task{{ID: "t1", Title: "First task", Status: domain.TaskStatusPending}}
+	notifier := &fakeNotifier{}
+	pusher := newSuccessPusher()
+
+	agent := &fakeAgent{}
+	agent.respond = func(idx int, req ports.RunRequest) (ports.RunResult, error) {
+		switch idx {
+		case 0:
+			return ports.RunResult{Output: `{"action":"next_task","task_id":"t1","dev_prompt":"p1"}`}, nil
+		case 1:
+			return ports.RunResult{Output: "impl1", Success: true}, nil
+		case 2:
+			return ports.RunResult{Output: `{"verdict":"accept","reasoning":"ship it"}`}, nil
+		case 3:
+			return ports.RunResult{Output: `{"action":"product_done","reasoning":"done"}`}, nil
+		default:
+			t.Fatalf("unexpected agent call #%d", idx)
+			return ports.RunResult{}, nil
+		}
+	}
+
+	cfg := testConfig()
+	cfg.LocalVerifyCommand = "" // explicitly unset, like the empty-skips-verification doc says
+	loop := newTestLoop(agent, store, notifier, pusher, cfg)
+	if err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if len(pusher.calls) != 1 {
+		t.Fatalf("got %d push calls, want exactly 1 (empty LocalVerifyCommand must not skip push)", len(pusher.calls))
+	}
+	if store.runState.Phase != domain.PhaseDone {
+		t.Fatalf("got phase %q, want done", store.runState.Phase)
+	}
+}
+
+// TestRun_VerifyNeverPasses_NeverCallsPushAndEventuallyBlocks is the
+// regression test for the task-001 incident: a LocalVerifyCommand that
+// always fails (e.g. because the shell it needs isn't on PATH in the
+// environment the orchestrator was launched from) must NEVER reach
+// CommitAndPush, and must eventually leave the task in `blocked` - not
+// silently marked done, and not stuck retrying forever.
+func TestRun_VerifyNeverPasses_NeverCallsPushAndEventuallyBlocks(t *testing.T) {
+	store := newFakeStore(nil)
+	store.backlog = []domain.Task{{ID: "t1", Title: "First task", Status: domain.TaskStatusPending}}
+	notifier := &fakeNotifier{}
+	pusher := newSuccessPusher()
+
+	agent := &fakeAgent{}
+	agent.respond = func(idx int, req ports.RunRequest) (ports.RunResult, error) {
+		switch idx {
+		case 0:
+			return ports.RunResult{Output: `{"action":"next_task","task_id":"t1","dev_prompt":"p1"}`}, nil
+		default:
+			// Every dev call and every PO evaluate call reports "success" -
+			// the point is that it never matters, because verify (below)
+			// never lets it reach the push step. Distinguish a PO-evaluate
+			// call from a Dev call by a string unique to poEvaluatePrompt.
+			if strings.Contains(req.Prompt, "Relatório do Desenvolvedor") {
+				return ports.RunResult{Output: `{"verdict":"accept","reasoning":"looks fine"}`}, nil
+			}
+			return ports.RunResult{Output: "impl", Success: true}, nil
+		}
+	}
+
+	cfg := testConfig()
+	cfg.MaxAttemptsPerTask = 2
+	cfg.LocalVerifyCommand = "go build ./... && go vet ./... && go test ./..."
+	loop := newTestLoop(agent, store, notifier, pusher, cfg)
+	loop.Verify = func(ctx context.Context, dir, command string) (string, string, error) {
+		return "", "", fmt.Errorf(`exec: "sh": executable file not found in %%PATH%%`)
+	}
+
+	if err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if len(pusher.calls) != 0 {
+		t.Fatalf("got %d push calls, want 0 - a permanently failing verify must never reach CommitAndPush", len(pusher.calls))
+	}
+	if store.runState.Phase != domain.PhaseBlocked {
+		t.Fatalf("got phase %q, want blocked (never silently done, never stuck retrying forever)", store.runState.Phase)
+	}
+	if store.backlog[0].Status != domain.TaskStatusBlocked {
+		t.Fatalf("got backlog status %q, want blocked", store.backlog[0].Status)
+	}
+}
+
 // ---------------------------------------------------------------------
 // checkpointing
 // ---------------------------------------------------------------------
