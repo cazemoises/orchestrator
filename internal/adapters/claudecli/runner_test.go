@@ -3,6 +3,7 @@ package claudecli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -35,15 +36,26 @@ func TestIsRateLimited_ReturnsFalseForOrdinaryOutput(t *testing.T) {
 
 // --- buildArgs -----------------------------------------------------------
 
-func TestBuildArgs_IncludesPromptAndOutputFormat(t *testing.T) {
+func TestBuildArgs_IncludesOutputFormat(t *testing.T) {
 	args := buildArgs(ports.RunRequest{Prompt: "do the thing"}, true)
 
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--output-format json") {
 		t.Fatalf("args %v missing --output-format json", args)
 	}
-	if args[len(args)-1] != "do the thing" {
-		t.Fatalf("args %v: expected prompt as last argument", args)
+}
+
+func TestBuildArgs_DoesNotIncludePromptAsArgument(t *testing.T) {
+	// The prompt goes over stdin, never as a CLI argument: on Windows,
+	// cmd.exe truncates command lines around ~8191 characters, which
+	// silently mangles large prompts (vision.md + backlog.json embedded)
+	// before they ever reach the claude process.
+	args := buildArgs(ports.RunRequest{Prompt: "do the thing"}, true)
+
+	for _, a := range args {
+		if strings.Contains(a, "do the thing") {
+			t.Fatalf("args %v: prompt must not appear as a CLI argument", args)
+		}
 	}
 }
 
@@ -112,10 +124,12 @@ type fakeExec struct {
 	stdout, stderr string
 	err            error
 	gotArgs        []string
+	gotStdin       string
 }
 
-func (f *fakeExec) run(ctx context.Context, workDir string, args []string) (string, string, error) {
+func (f *fakeExec) run(ctx context.Context, workDir string, args []string, stdin string) (string, string, error) {
 	f.gotArgs = args
+	f.gotStdin = stdin
 	return f.stdout, f.stderr, f.err
 }
 
@@ -182,6 +196,50 @@ func TestRun_ReturnsErrorWhenExecFailsToStart(t *testing.T) {
 	_, err := r.Run(context.Background(), ports.RunRequest{Prompt: "x"})
 	if err == nil {
 		t.Fatal("expected Run to propagate exec start failure as error")
+	}
+}
+
+func TestRun_SendsPromptViaStdinNotArgs(t *testing.T) {
+	fe := &fakeExec{stdout: `{"result": "ok", "is_error": false, "num_turns": 1}`}
+	r := &Runner{exec: fe.run, maxTurnsSupported: boolPtr(true)}
+
+	prompt := "this is the prompt body, it must go over stdin"
+	if _, err := r.Run(context.Background(), ports.RunRequest{Prompt: prompt}); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if fe.gotStdin != prompt {
+		t.Fatalf("got stdin %q, want prompt %q", fe.gotStdin, prompt)
+	}
+	for _, a := range fe.gotArgs {
+		if strings.Contains(a, prompt) {
+			t.Fatalf("gotArgs %v: prompt leaked into CLI arguments", fe.gotArgs)
+		}
+	}
+}
+
+// TestRunProcess_LargeStdinArrivesIntact exercises the real os/exec plumbing
+// (not the fakeExec seam) with a prompt far larger than Windows cmd.exe's
+// ~8191-character command-line limit, using `cat` (portable, no network
+// dependency) as a stand-in for `claude` to prove stdin - not argv - is how
+// the payload travels, and that it survives the trip byte-for-byte.
+func TestRunProcess_LargeStdinArrivesIntact(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("# Vision\n\n")
+	for i := 0; i < 2000; i++ {
+		fmt.Fprintf(&b, `{"id":"task-%d","title":"do the thing number %d","status":"pending"}`, i, i)
+	}
+	largePrompt := b.String()
+	if len(largePrompt) <= 10000 {
+		t.Fatalf("test setup bug: largePrompt is only %d chars, want >10000", len(largePrompt))
+	}
+
+	stdout, stderr, err := runProcess(context.Background(), "cat", "", nil, largePrompt)
+	if err != nil {
+		t.Fatalf("runProcess returned error: %v (stderr: %s)", err, stderr)
+	}
+	if stdout != largePrompt {
+		t.Fatalf("got stdout of length %d, want %d to match input exactly", len(stdout), len(largePrompt))
 	}
 }
 

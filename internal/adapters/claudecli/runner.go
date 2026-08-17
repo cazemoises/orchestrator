@@ -61,7 +61,12 @@ func parseEnvelope(stdout string) (envelope, error) {
 	return env, nil
 }
 
-// buildArgs turns a RunRequest into `claude` CLI arguments.
+// buildArgs turns a RunRequest into `claude` CLI arguments. The prompt is
+// deliberately NOT included here: it is sent over stdin instead (see
+// execFunc), never as a CLI argument. On Windows, cmd.exe truncates command
+// lines around ~8191 characters, which silently mangled large prompts
+// (vision.md + backlog.json embedded in the PO prompt routinely exceed
+// that) before they ever reached the claude process.
 // supportsMaxTurns controls whether --max-turns is emitted at all: older
 // and newer CLI builds have both shipped without it (see maxTurnsSupported
 // probing below), and passing an unknown flag is a hard failure for the
@@ -79,17 +84,22 @@ func buildArgs(req ports.RunRequest, supportsMaxTurns bool) []string {
 		args = append(args, "--model", req.Model)
 	}
 
-	args = append(args, req.Prompt)
 	return args
 }
 
-// execFunc runs the claude binary and returns its stdout/stderr. It is a
-// seam for testing: production code uses runViaOSExec; tests inject a fake.
-type execFunc func(ctx context.Context, workDir string, args []string) (stdout, stderr string, err error)
+// execFunc runs a binary with the prompt fed over stdin and returns its
+// stdout/stderr. It is a seam for testing: production code uses
+// runViaOSExec; tests inject a fake.
+type execFunc func(ctx context.Context, workDir string, args []string, stdin string) (stdout, stderr string, err error)
 
-func runViaOSExec(ctx context.Context, workDir string, args []string) (string, string, error) {
-	cmd := exec.CommandContext(ctx, "claude", args...)
+// runProcess runs binPath with args in workDir, writing stdin to the
+// process's standard input. Split out from runViaOSExec so tests can
+// exercise the real os/exec stdin plumbing against a portable stand-in
+// binary (e.g. `cat`) instead of the real `claude`.
+func runProcess(ctx context.Context, binPath, workDir string, args []string, stdin string) (string, string, error) {
+	cmd := exec.CommandContext(ctx, binPath, args...)
 	cmd.Dir = workDir
+	cmd.Stdin = strings.NewReader(stdin)
 
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
@@ -103,6 +113,10 @@ func runViaOSExec(ctx context.Context, workDir string, args []string) (string, s
 		err = nil
 	}
 	return stdout.String(), stderr.String(), err
+}
+
+func runViaOSExec(ctx context.Context, workDir string, args []string, stdin string) (string, string, error) {
+	return runProcess(ctx, "claude", workDir, args, stdin)
 }
 
 // Runner is the production ports.AgentRunner backed by the claude CLI.
@@ -125,7 +139,7 @@ func (r *Runner) probeMaxTurnsSupport(ctx context.Context) bool {
 	helpFunc := r.helpFunc
 	if helpFunc == nil {
 		helpFunc = func(ctx context.Context) (string, error) {
-			out, _, err := runViaOSExec(ctx, "", []string{"-p", "--help"})
+			out, _, err := runViaOSExec(ctx, "", []string{"-p", "--help"}, "")
 			return out, err
 		}
 	}
@@ -148,7 +162,7 @@ func (r *Runner) Run(ctx context.Context, req ports.RunRequest) (ports.RunResult
 	}
 
 	args := buildArgs(req, supportsMaxTurns)
-	stdout, stderr, err := execFn(ctx, req.WorkDir, args)
+	stdout, stderr, err := execFn(ctx, req.WorkDir, args, req.Prompt)
 	if err != nil {
 		return ports.RunResult{}, fmt.Errorf("claudecli: running claude: %w", err)
 	}
