@@ -54,6 +54,34 @@ como `blocked`, notifica com o erro completo do git, e para. Push é
 sempre feito pra `origin <branch atual>` — configure a branch/remote do
 seu clone local antes de rodar o loop.
 
+## Por que `--dangerously-skip-permissions` é seguro neste contexto específico
+
+O adapter `claudecli` sempre passa `--dangerously-skip-permissions` nas
+chamadas ao Dev (nunca nas chamadas ao PO — o PO não toca em arquivos, e
+mantém os prompts de permissão normais do Claude Code). Motivo: `claude -p`
+roda sem TTY (modo headless) — se uma tool pedir aprovação interativa, não
+tem quem responda, e a chamada simplesmente trava para sempre. Sem essa
+flag, o Dev nunca consegue completar uma task que edite/crie arquivos.
+
+Isso remove uma camada de segurança real do Claude Code (ele para de pedir
+aprovação antes de qualquer ação). É aceitável especificamente aqui porque:
+
+- **(a) `AllowedTools` já restringe explicitamente** o que o Dev pode
+  fazer — `--dangerously-skip-permissions` pula a pergunta "posso usar
+  X?", mas não amplia o conjunto de tools disponíveis; ferramentas fora de
+  `ORCH_DEV_ALLOWED_TOOLS` continuam indisponíveis.
+- **(b) `WorkDir` é sempre um diretório de projeto específico**
+  (`ORCH_REPO_DIR`), nunca o sistema inteiro — o blast radius de qualquer
+  ação do Dev fica contido ali.
+- **(c) O guardrail de `LocalVerifyCommand` + `GitPusher`** (ver acima)
+  impede que código quebrado seja commitado/pushado mesmo que o Dev faça
+  algo errado sob essa flag — nada sai do `WorkDir` local sem passar pela
+  verificação primeiro.
+
+Se esse raciocínio deixar de valer (ex: `ORCH_DEV_ALLOWED_TOOLS` vazio,
+`ORCH_REPO_DIR` apontando pra um lugar sensível, ou `LocalVerifyCommand`
+desabilitado), reavalie usar essa flag antes de rodar o loop.
+
 ## Por que isso existe: rate limit da assinatura
 
 O orchestrator autentica no Claude Code via `CLAUDE_CODE_OAUTH_TOKEN`, ou

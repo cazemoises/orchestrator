@@ -91,6 +91,24 @@ func TestBuildArgs_IncludesMaxTurnsWhenSupportedAndSet(t *testing.T) {
 	}
 }
 
+func TestBuildArgs_IncludesSkipPermissionsFlagWhenRequested(t *testing.T) {
+	args := buildArgs(ports.RunRequest{Prompt: "x", SkipPermissions: true}, true)
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--dangerously-skip-permissions") {
+		t.Fatalf("args %v missing --dangerously-skip-permissions", args)
+	}
+}
+
+func TestBuildArgs_OmitsSkipPermissionsFlagByDefault(t *testing.T) {
+	// PO calls never set SkipPermissions - the PO doesn't touch files, so
+	// it keeps Claude Code's normal permission prompts as a safety net.
+	args := buildArgs(ports.RunRequest{Prompt: "x"}, true)
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "skip-permissions") {
+		t.Fatalf("args %v should not contain the skip-permissions flag when SkipPermissions is false", args)
+	}
+}
+
 func TestBuildArgs_OmitsMaxTurnsWhenZero(t *testing.T) {
 	args := buildArgs(ports.RunRequest{Prompt: "x", MaxTurns: 0}, true)
 	joined := strings.Join(args, " ")

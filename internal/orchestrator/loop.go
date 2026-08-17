@@ -310,6 +310,11 @@ func (l *Loop) stepDev(ctx context.Context, state *domain.RunState) error {
 		AllowedTools: l.Config.DevAllowedTools,
 		MaxTurns:     l.Config.DevMaxTurns,
 		Model:        l.Config.DevModel,
+		// Headless (-p) has no TTY to answer Claude Code's interactive
+		// permission prompts - see claudecli's buildArgs for the full
+		// safety reasoning. Only the Dev call sets this; the PO never
+		// touches files, so it keeps normal permission prompts.
+		SkipPermissions: true,
 	}
 	res, err := l.callAgent(ctx, state, req)
 	if err != nil {

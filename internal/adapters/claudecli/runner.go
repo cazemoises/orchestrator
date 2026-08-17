@@ -83,6 +83,22 @@ func buildArgs(req ports.RunRequest, supportsMaxTurns bool) []string {
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
 	}
+	if req.SkipPermissions {
+		// Claude Code normally pauses to ask interactive approval before a
+		// tool call; in headless mode (-p, no TTY) there is nobody to
+		// answer that prompt, so the Dev call would just hang forever
+		// without this flag. Only set for Dev requests (never PO, which
+		// doesn't touch files) - this is deliberately accepted as safe
+		// here because: (a) AllowedTools already restricts which tools the
+		// Dev can use at all, (b) WorkDir is always a specific project
+		// directory, never the whole machine, and (c) the orchestrator's
+		// LocalVerifyCommand + GitPusher guardrail (see loop.go's
+		// handleAccept) stop broken code from ever being committed or
+		// pushed even if the Dev does something wrong under this flag.
+		// See README.md, "Por que --dangerously-skip-permissions é seguro
+		// neste contexto específico" for the full writeup.
+		args = append(args, "--dangerously-skip-permissions")
+	}
 
 	return args
 }

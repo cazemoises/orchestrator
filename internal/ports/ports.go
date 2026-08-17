@@ -15,6 +15,12 @@ type RunRequest struct {
 	AllowedTools []string
 	MaxTurns     int
 	Model        string
+
+	// SkipPermissions, when true, tells the runner to bypass Claude Code's
+	// interactive permission prompts (headless mode has no TTY to answer
+	// them). Only ever set for Dev calls - see loop.go's stepDev and
+	// claudecli's buildArgs for the reasoning.
+	SkipPermissions bool
 }
 
 // RunResult is what came back from an agent invocation.
