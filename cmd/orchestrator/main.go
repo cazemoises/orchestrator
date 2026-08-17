@@ -14,6 +14,7 @@ import (
 
 	"orchestrator/internal/adapters/claudecli"
 	"orchestrator/internal/adapters/filestore"
+	"orchestrator/internal/adapters/gitcli"
 	"orchestrator/internal/adapters/notifier"
 	"orchestrator/internal/orchestrator"
 	"orchestrator/internal/ports"
@@ -33,10 +34,13 @@ func main() {
 		DevAllowedTools:    envList("ORCH_DEV_ALLOWED_TOOLS"),
 		POModel:            os.Getenv("ORCH_PO_MODEL"),
 		DevModel:           os.Getenv("ORCH_DEV_MODEL"),
+		LocalVerifyCommand: os.Getenv("ORCH_LOCAL_VERIFY_COMMAND"),
+		GitCommitPrefix:    os.Getenv("ORCH_GIT_COMMIT_PREFIX"),
 	}
 
 	store := filestore.New(dataDir)
 	agent := claudecli.NewRunner()
+	pusher := &gitcli.Pusher{}
 
 	var notif ports.Notifier
 	if webhook := os.Getenv("ORCH_NOTIFY_WEBHOOK"); webhook != "" {
@@ -45,7 +49,7 @@ func main() {
 		notif = notifier.NewStdout()
 	}
 
-	loop := orchestrator.New(agent, store, notif, cfg)
+	loop := orchestrator.New(agent, store, notif, pusher, cfg)
 
 	log.Printf("orchestrator: starting (repo_dir=%s data_dir=%s)", repoDir, dataDir)
 	err := loop.Run(ctx)
