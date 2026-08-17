@@ -51,3 +51,28 @@ type MemoryStore interface {
 type Notifier interface {
 	Notify(ctx context.Context, message string) error
 }
+
+// PushRequest describes one commit+push of the target repo's working tree.
+type PushRequest struct {
+	RepoDir       string
+	CommitMessage string
+}
+
+// PushResult is what happened as a result of a PushRequest.
+type PushResult struct {
+	Pushed     bool
+	CommitHash string
+	Skipped    bool // true if there were no changes to commit
+}
+
+// GitPusher commits and pushes whatever changes are sitting in a repo's
+// working tree - the only path by which code produced by the Dev agent
+// reaches the CI/CD pipeline.
+type GitPusher interface {
+	// CommitAndPush runs `git add -A`, commits if there are changes, and
+	// pushes. It returns Skipped=true (not an error) if there was nothing
+	// to commit. Any real git failure (conflict, rejected push, missing
+	// credentials) is returned as a non-nil error - it must never fail
+	// silently.
+	CommitAndPush(ctx context.Context, req PushRequest) (PushResult, error)
+}
