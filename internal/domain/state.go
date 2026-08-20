@@ -54,8 +54,17 @@ type DevReport struct {
 // PODecision is the parsed response of the PO agent when deciding what to
 // work on next.
 type PODecision struct {
-	Action    string `json:"action"` // "next_task" | "product_done"
-	TaskID    string `json:"task_id"`
+	Action string `json:"action"` // "next_task" | "product_done"
+	TaskID string `json:"task_id"`
+
+	// Title and Description are always required alongside TaskID, even when
+	// the PO is just picking an existing backlog entry. This is what lets
+	// the loop add TaskID to the backlog when it isn't found there yet -
+	// e.g. the PO invented a new task_id because the backlog ran out -
+	// instead of silently dropping the status update. See markTaskStatus.
+	Title       string `json:"title"`
+	Description string `json:"description"`
+
 	DevPrompt string `json:"dev_prompt"`
 	Reasoning string `json:"reasoning"`
 }

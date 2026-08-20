@@ -17,9 +17,18 @@ func TestPODecidePrompt_IncludesAllInputs(t *testing.T) {
 
 func TestPODecidePrompt_InstructsJSONOnlyResponseFormat(t *testing.T) {
 	got := poDecidePrompt("v", "s", "[]")
-	for _, want := range []string{"action", "task_id", "dev_prompt", "reasoning", "next_task", "product_done"} {
+	for _, want := range []string{"action", "task_id", "title", "description", "dev_prompt", "reasoning", "next_task", "product_done"} {
 		if !contains(got, want) {
 			t.Errorf("prompt missing PODecision field %q", want)
+		}
+	}
+}
+
+func TestPODecidePrompt_InstructsTitleAndDescriptionRequiredEvenForInventedTaskIDs(t *testing.T) {
+	got := poDecidePrompt("v", "s", "[]")
+	for _, want := range []string{"inventar", "esgotou"} {
+		if !contains(got, want) {
+			t.Errorf("prompt missing instruction covering %q (title/description required even for a task_id invented outside the backlog)", want)
 		}
 	}
 }

@@ -638,6 +638,58 @@ func TestRun_VerifyNeverPasses_NeverCallsPushAndEventuallyBlocks(t *testing.T) {
 	}
 }
 
+// TestRun_POInventsNewTaskID_AddsTaskToBacklogAsDoneAfterAccept is the
+// regression test for the task-004 incident: when the backlog is exhausted
+// and the PO invents a task_id that doesn't exist in backlog.json yet,
+// markTaskStatus used to silently no-op (task not found -> ignored) instead
+// of adding it. The task would get implemented, accepted and pushed, but
+// backlog.json would never show any trace of it. It must instead be added
+// to the backlog - using the title/description the PO provided in its
+// decision - and end up "done" once accepted.
+func TestRun_POInventsNewTaskID_AddsTaskToBacklogAsDoneAfterAccept(t *testing.T) {
+	store := newFakeStore(nil)
+	store.backlog = []domain.Task{} // backlog exhausted: nothing for the PO to pick from
+	notifier := &fakeNotifier{}
+
+	agent := &fakeAgent{}
+	agent.respond = func(idx int, req ports.RunRequest) (ports.RunResult, error) {
+		switch idx {
+		case 0:
+			return ports.RunResult{Output: `{"action":"next_task","task_id":"task-099","title":"Invented task","description":"PO invented this because the backlog ran out","dev_prompt":"do it"}`}, nil
+		case 1:
+			return ports.RunResult{Output: "impl", Success: true}, nil
+		case 2:
+			return ports.RunResult{Output: `{"verdict":"accept","reasoning":"ship it"}`}, nil
+		case 3:
+			return ports.RunResult{Output: `{"action":"product_done","reasoning":"done"}`}, nil
+		default:
+			t.Fatalf("unexpected agent call #%d", idx)
+			return ports.RunResult{}, nil
+		}
+	}
+
+	loop := newTestLoop(agent, store, notifier, newSuccessPusher(), testConfig())
+	if err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	var found *domain.Task
+	for i := range store.backlog {
+		if store.backlog[i].ID == "task-099" {
+			found = &store.backlog[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("got backlog %+v, want it to contain the PO-invented task-099", store.backlog)
+	}
+	if found.Status != domain.TaskStatusDone {
+		t.Fatalf("got task-099 status %q, want done", found.Status)
+	}
+	if found.Title != "Invented task" || found.Description != "PO invented this because the backlog ran out" {
+		t.Fatalf("got task-099 title/description %q/%q, want them preserved from the PO decision", found.Title, found.Description)
+	}
+}
+
 // ---------------------------------------------------------------------
 // checkpointing
 // ---------------------------------------------------------------------

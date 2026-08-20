@@ -295,10 +295,9 @@ func (l *Loop) stepPODecide(ctx context.Context, state *domain.RunState) error {
 		return l.checkpoint(ctx, state)
 	}
 
-	if err := markTaskStatus(tasks, decision.TaskID, domain.TaskStatusInProgress, l.Now()); err == nil {
-		if err := l.Store.WriteBacklog(ctx, tasks); err != nil {
-			return err
-		}
+	tasks = markTaskStatus(tasks, decision.TaskID, decision.Title, decision.Description, domain.TaskStatusInProgress, l.Now())
+	if err := l.Store.WriteBacklog(ctx, tasks); err != nil {
+		return err
 	}
 
 	state.CurrentTaskID = decision.TaskID
@@ -464,10 +463,9 @@ func (l *Loop) handleAccept(ctx context.Context, state *domain.RunState, taskID 
 			taskID, pushErr))
 	}
 
-	if err := markTaskStatus(tasks, taskID, domain.TaskStatusDone, l.Now()); err == nil {
-		if err := l.Store.WriteBacklog(ctx, tasks); err != nil {
-			return false, err
-		}
+	tasks = markTaskStatus(tasks, taskID, taskTitle, "", domain.TaskStatusDone, l.Now())
+	if err := l.Store.WriteBacklog(ctx, tasks); err != nil {
+		return false, err
 	}
 	state.Phase = domain.PhasePODeciding
 	state.CurrentTaskID = ""
@@ -518,24 +516,36 @@ func formatPushHistory(res ports.PushResult, err error, now time.Time) string {
 func (l *Loop) blockTask(ctx context.Context, state *domain.RunState, taskID, message string) error {
 	tasks, err := l.Store.ReadBacklog(ctx)
 	if err == nil {
-		if err := markTaskStatus(tasks, taskID, domain.TaskStatusBlocked, l.Now()); err == nil {
-			_ = l.Store.WriteBacklog(ctx, tasks)
-		}
+		tasks = markTaskStatus(tasks, taskID, taskID, "", domain.TaskStatusBlocked, l.Now())
+		_ = l.Store.WriteBacklog(ctx, tasks)
 	}
 	_ = l.Notifier.Notify(ctx, message)
 	state.Phase = domain.PhaseBlocked
 	return l.checkpoint(ctx, state)
 }
 
-func markTaskStatus(tasks []domain.Task, taskID string, status domain.TaskStatus, now time.Time) error {
+// markTaskStatus updates taskID's status in tasks. If taskID isn't found -
+// e.g. the PO invented a task_id because the backlog ran out (see
+// poDecidePrompt) - it is appended instead of the update being silently
+// dropped, using title/description as provided by the caller (typically the
+// PO's own decision). The returned slice must be passed to WriteBacklog:
+// appending may reallocate, so tasks itself cannot be relied on afterward.
+func markTaskStatus(tasks []domain.Task, taskID, title, description string, status domain.TaskStatus, now time.Time) []domain.Task {
 	for i := range tasks {
 		if tasks[i].ID == taskID {
 			tasks[i].Status = status
 			tasks[i].UpdatedAt = now
-			return nil
+			return tasks
 		}
 	}
-	return fmt.Errorf("orchestrator: task %q not found in backlog", taskID)
+	return append(tasks, domain.Task{
+		ID:          taskID,
+		Title:       title,
+		Description: description,
+		Status:      status,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	})
 }
 
 func formatHistoryEntry(state *domain.RunState, eval domain.POEvaluation, now time.Time) string {

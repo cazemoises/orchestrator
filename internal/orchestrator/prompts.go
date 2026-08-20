@@ -25,8 +25,17 @@ atual e no backlog abaixo.
 Decida uma de duas coisas:
 1. Existe trabalho a fazer: escolha a próxima task do backlog (ou refine uma
    existente) e escreva um dev_prompt completo para o Desenvolvedor executá-la.
+   Se o backlog se esgotou e não há mais nenhuma task pendente que sirva, você
+   pode inventar um novo task_id (ex: o próximo da sequência) para uma task que
+   ainda não existe em backlog.json - o loop vai adicioná-la automaticamente.
 2. O produto está pronto segundo o critério de "produto pronto" da visão:
    sinalize product_done.
+
+Sempre que action for "next_task", preencha também title e description de
+forma minimamente informativa - mesmo quando a task já existe no backlog
+(nesse caso repita o title/description dela) e mesmo quando você mesmo
+inventar o task_id porque o backlog se esgotou. Eles são usados para
+registrar a task em backlog.json caso ela ainda não exista lá.
 
 O dev_prompt que você escrever é a ÚNICA informação que o Desenvolvedor vai
 receber — ele não tem memória de nada além do que estiver nesse prompt. Portanto
@@ -44,7 +53,7 @@ o dev_prompt precisa ser AUTOCONTIDO e DEVE incluir, sempre que relevante:
 Responda APENAS com um objeto JSON no formato exato abaixo. Não inclua
 markdown, cercas de código, nem nenhum texto antes ou depois do JSON:
 
-{"action": "next_task" | "product_done", "task_id": "...", "dev_prompt": "...", "reasoning": "..."}
+{"action": "next_task" | "product_done", "task_id": "...", "title": "...", "description": "...", "dev_prompt": "...", "reasoning": "..."}
 `, vision, state, backlogJSON)
 }
 
