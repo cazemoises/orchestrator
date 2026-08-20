@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -242,6 +243,8 @@ func (l *Loop) callAgent(ctx context.Context, state *domain.RunState, req ports.
 
 		elapsed := now.Sub(*state.RateLimitedAt)
 		wait := computeWait(elapsed, l.Config.RateLimitWaitMin, l.Config.RateLimitWaitMax)
+		log.Printf("orchestrator: rate limited - esperando mais %s antes de tentar de novo (limitado desde %s, %s decorrido até agora)",
+			wait, state.RateLimitedAt.Format(time.RFC3339), elapsed.Round(time.Second))
 		_ = l.Notifier.Notify(ctx, fmt.Sprintf(
 			"Claude Code rate limited; waiting %s before retrying (rate-limited since %s)",
 			wait, state.RateLimitedAt.Format(time.RFC3339)))
@@ -253,6 +256,8 @@ func (l *Loop) callAgent(ctx context.Context, state *domain.RunState, req ports.
 }
 
 func (l *Loop) stepPODecide(ctx context.Context, state *domain.RunState) error {
+	log.Printf("orchestrator: PO analisando backlog e decidindo próxima tarefa...")
+
 	vision, err := l.Store.ReadVision(ctx)
 	if err != nil {
 		return err
@@ -291,9 +296,12 @@ func (l *Loop) stepPODecide(ctx context.Context, state *domain.RunState) error {
 	}
 
 	if decision.Action == "product_done" {
+		log.Printf("orchestrator: PO decidiu que o produto está pronto\nreasoning: %s", decision.Reasoning)
 		state.Phase = domain.PhaseDone
 		return l.checkpoint(ctx, state)
 	}
+
+	log.Printf("orchestrator: PO decidiu: task=%s título=%q\nreasoning: %s", decision.TaskID, decision.Title, decision.Reasoning)
 
 	tasks = markTaskStatus(tasks, decision.TaskID, decision.Title, decision.Description, domain.TaskStatusInProgress, l.Now())
 	if err := l.Store.WriteBacklog(ctx, tasks); err != nil {
@@ -317,6 +325,18 @@ func (l *Loop) stepDev(ctx context.Context, state *domain.RunState) error {
 		return err
 	}
 
+	taskTitle := state.CurrentTaskID
+	if tasks, err := l.Store.ReadBacklog(ctx); err == nil {
+		for _, task := range tasks {
+			if task.ID == state.CurrentTaskID {
+				taskTitle = task.Title
+				break
+			}
+		}
+	}
+	log.Printf("orchestrator: Dev iniciando tarefa %s: %s (prompt: %d caracteres)",
+		state.CurrentTaskID, taskTitle, len(state.CurrentDevPrompt))
+
 	req := ports.RunRequest{
 		Prompt:       state.CurrentDevPrompt,
 		WorkDir:      l.Config.RepoDir,
@@ -333,6 +353,9 @@ func (l *Loop) stepDev(ctx context.Context, state *domain.RunState) error {
 	if err != nil {
 		return err
 	}
+
+	log.Printf("orchestrator: Dev terminou tarefa %s: success=%v duração=%.1fs num_turns=%d",
+		state.CurrentTaskID, res.Success, res.DurationSec, res.NumTurns)
 
 	state.LastDevReport = &domain.DevReport{
 		TaskID:       state.CurrentTaskID,
@@ -353,6 +376,7 @@ func (l *Loop) stepPOEvaluate(ctx context.Context, state *domain.RunState) (bool
 	if err := l.checkpoint(ctx, state); err != nil {
 		return false, err
 	}
+	log.Printf("orchestrator: PO avaliando o relatório do Dev...")
 
 	vision, err := l.Store.ReadVision(ctx)
 	if err != nil {
@@ -385,6 +409,8 @@ func (l *Loop) stepPOEvaluate(ctx context.Context, state *domain.RunState) (bool
 		state.Phase = domain.PhaseBlocked
 		return false, l.checkpoint(ctx, state)
 	}
+
+	log.Printf("orchestrator: PO avaliou task=%s: veredito=%s\nreasoning: %s", taskID, evaluation.Verdict, evaluation.Reasoning)
 
 	_ = l.Store.AppendHistory(ctx, taskID, formatHistoryEntry(state, evaluation, l.Now()))
 

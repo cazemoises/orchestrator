@@ -1,8 +1,10 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -687,6 +689,72 @@ func TestRun_POInventsNewTaskID_AddsTaskToBacklogAsDoneAfterAccept(t *testing.T)
 	}
 	if found.Title != "Invented task" || found.Description != "PO invented this because the backlog ran out" {
 		t.Fatalf("got task-099 title/description %q/%q, want them preserved from the PO decision", found.Title, found.Description)
+	}
+}
+
+// ---------------------------------------------------------------------
+// real-time progress logging
+// ---------------------------------------------------------------------
+
+// TestRun_LogsProgressAtEachTransition verifies that every major state
+// transition is logged via the standard log package as it happens - not just
+// reflected in the final state/history after the whole cycle completes. This
+// is what lets someone watching the terminal see the PO's decision and
+// reasoning, the Dev call starting/finishing, and the PO's verdict, in real
+// time.
+func TestRun_LogsProgressAtEachTransition(t *testing.T) {
+	store := newFakeStore(nil)
+	store.backlog = []domain.Task{{ID: "t1", Title: "First task", Status: domain.TaskStatusPending}}
+	notifier := &fakeNotifier{}
+
+	agent := &fakeAgent{}
+	agent.respond = func(idx int, req ports.RunRequest) (ports.RunResult, error) {
+		switch idx {
+		case 0:
+			return ports.RunResult{Output: `{"action":"next_task","task_id":"t1","title":"First task","dev_prompt":"implement thing","reasoning":"picking it up"}`}, nil
+		case 1:
+			return ports.RunResult{Output: "done implementing", Success: true, NumTurns: 5, DurationSec: 12.3}, nil
+		case 2:
+			return ports.RunResult{Output: `{"verdict":"accept","reasoning":"tests pass"}`}, nil
+		case 3:
+			return ports.RunResult{Output: `{"action":"product_done","reasoning":"nothing left"}`}, nil
+		default:
+			t.Fatalf("unexpected agent call #%d: %+v", idx, req)
+			return ports.RunResult{}, nil
+		}
+	}
+
+	var logBuf bytes.Buffer
+	prevOutput := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(prevOutput)
+		log.SetFlags(prevFlags)
+	}()
+
+	loop := newTestLoop(agent, store, notifier, newSuccessPusher(), testConfig())
+	if err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	got := logBuf.String()
+	for _, want := range []string{
+		"PO analisando backlog",
+		"t1",
+		"First task",
+		"picking it up",
+		"Dev iniciando tarefa t1",
+		"Dev terminou tarefa t1",
+		"success=true",
+		"PO avaliando o relatório",
+		"veredito=accept",
+		"tests pass",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("log output missing %q\n--- full log ---\n%s", want, got)
+		}
 	}
 }
 
