@@ -75,7 +75,15 @@ func parseEnvelope(stdout string) (envelope, error) {
 // probing below), and passing an unknown flag is a hard failure for the
 // whole invocation.
 func buildArgs(req ports.RunRequest, supportsMaxTurns bool) []string {
-	args := []string{"-p", "--output-format", "json"}
+	// stream-json requires --verbose when combined with --print (`claude`
+	// refuses to start otherwise, as of CLI 2.1.x). Only Dev calls ever set
+	// StreamOutput - see ports.RunRequest and loop.go's stepDev.
+	var args []string
+	if req.StreamOutput {
+		args = []string{"-p", "--output-format", "stream-json", "--verbose"}
+	} else {
+		args = []string{"-p", "--output-format", "json"}
+	}
 
 	if len(req.AllowedTools) > 0 {
 		args = append(args, "--allowedTools", strings.Join(req.AllowedTools, ","))
@@ -138,16 +146,62 @@ func runViaOSExec(ctx context.Context, workDir string, args []string, stdin stri
 	return runProcess(ctx, "claude", workDir, args, stdin)
 }
 
+// streamExecFunc is runProcessStreaming's signature - a seam for testing,
+// mirroring execFunc but reading stdout line-by-line in real time via
+// onEvent (see scanDevStream) instead of only returning once the process
+// exits.
+type streamExecFunc func(ctx context.Context, workDir string, args []string, stdin string, onEvent streamEventLogger) (stdout, stderr, resultLine string, err error)
+
+// runProcessStreaming runs binPath with args in workDir, writing stdin to
+// the process, and reads its stdout line-by-line as it's produced (unlike
+// runProcess, which only sees output after the process exits) so onEvent
+// can surface progress in real time. See scanDevStream for what fullOutput
+// and resultLine mean.
+func runProcessStreaming(ctx context.Context, binPath, workDir string, args []string, stdin string, onEvent streamEventLogger) (string, string, string, error) {
+	cmd := exec.CommandContext(ctx, binPath, args...)
+	cmd.Dir = workDir
+	cmd.Stdin = strings.NewReader(stdin)
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", "", "", err
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return "", "", "", err
+	}
+
+	stdout, resultLine, scanErr := scanDevStream(stdoutPipe, onEvent)
+
+	err = cmd.Wait()
+	if _, isExitErr := err.(*exec.ExitError); isExitErr {
+		// Same reasoning as runProcess: a non-zero exit is a normal outcome
+		// here, not a Go-level error.
+		err = nil
+	}
+	if err == nil && scanErr != nil {
+		err = scanErr
+	}
+	return stdout, stderr.String(), resultLine, err
+}
+
+func runViaOSExecStreaming(ctx context.Context, workDir string, args []string, stdin string, onEvent streamEventLogger) (string, string, string, error) {
+	return runProcessStreaming(ctx, "claude", workDir, args, stdin, onEvent)
+}
+
 // Runner is the production ports.AgentRunner backed by the claude CLI.
 type Runner struct {
 	exec              execFunc
+	streamExec        streamExecFunc
 	helpFunc          func(ctx context.Context) (string, error)
 	maxTurnsSupported *bool
 }
 
 // NewRunner creates a Runner that shells out to the real `claude` binary.
 func NewRunner() *Runner {
-	return &Runner{exec: runViaOSExec}
+	return &Runner{exec: runViaOSExec, streamExec: runViaOSExecStreaming}
 }
 
 func (r *Runner) probeMaxTurnsSupport(ctx context.Context) bool {
@@ -170,18 +224,38 @@ func (r *Runner) probeMaxTurnsSupport(ctx context.Context) bool {
 }
 
 func (r *Runner) Run(ctx context.Context, req ports.RunRequest) (ports.RunResult, error) {
-	execFn := r.exec
-	if execFn == nil {
-		execFn = runViaOSExec
-	}
-
 	supportsMaxTurns := false
 	if req.MaxTurns > 0 {
 		supportsMaxTurns = r.probeMaxTurnsSupport(ctx)
 	}
-
 	args := buildArgs(req, supportsMaxTurns)
-	stdout, stderr, err := execFn(ctx, req.WorkDir, args, req.Prompt)
+
+	// envelopeSource is what gets handed to parseEnvelope: the whole stdout
+	// in the non-streaming ("json") path, or just the terminal "result"
+	// event's raw line in the streaming path (see scanDevStream) - stream
+	// mode's stdout is many NDJSON lines, not the single JSON object
+	// parseEnvelope expects.
+	var stdout, stderr, envelopeSource string
+	var err error
+
+	if req.StreamOutput {
+		streamExecFn := r.streamExec
+		if streamExecFn == nil {
+			streamExecFn = runViaOSExecStreaming
+		}
+		var resultLine string
+		stdout, stderr, resultLine, err = streamExecFn(ctx, req.WorkDir, args, req.Prompt, func(summary string) {
+			log.Printf("%s", summary)
+		})
+		envelopeSource = resultLine
+	} else {
+		execFn := r.exec
+		if execFn == nil {
+			execFn = runViaOSExec
+		}
+		stdout, stderr, err = execFn(ctx, req.WorkDir, args, req.Prompt)
+		envelopeSource = stdout
+	}
 	if err != nil {
 		return ports.RunResult{}, fmt.Errorf("claudecli: running claude: %w", err)
 	}
@@ -195,7 +269,7 @@ func (r *Runner) Run(ctx context.Context, req ports.RunRequest) (ports.RunResult
 		}, nil
 	}
 
-	env, err := parseEnvelope(stdout)
+	env, err := parseEnvelope(envelopeSource)
 	if err != nil {
 		// Defense in depth: RateLimitIndicators is a best-effort text match
 		// and will always be fragile to CLI wording changes (see the

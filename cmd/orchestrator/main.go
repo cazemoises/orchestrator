@@ -36,6 +36,7 @@ func main() {
 		DevModel:           os.Getenv("ORCH_DEV_MODEL"),
 		LocalVerifyCommand: os.Getenv("ORCH_LOCAL_VERIFY_COMMAND"),
 		GitCommitPrefix:    os.Getenv("ORCH_GIT_COMMIT_PREFIX"),
+		VerboseDevOutput:   envBool("ORCH_VERBOSE_DEV_OUTPUT", false),
 	}
 
 	store := filestore.New(dataDir)
@@ -81,6 +82,19 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func envBool(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		log.Printf("orchestrator: ignoring invalid %s=%q (%v), using default %v", key, v, err, fallback)
+		return fallback
+	}
+	return b
 }
 
 func envList(key string) []string {

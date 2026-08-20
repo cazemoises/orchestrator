@@ -1,9 +1,11 @@
 package claudecli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"testing"
 
@@ -113,6 +115,20 @@ func TestBuildArgs_OmitsSkipPermissionsFlagByDefault(t *testing.T) {
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "skip-permissions") {
 		t.Fatalf("args %v should not contain the skip-permissions flag when SkipPermissions is false", args)
+	}
+}
+
+func TestBuildArgs_UsesStreamJSONWhenStreamOutputSet(t *testing.T) {
+	args := buildArgs(ports.RunRequest{Prompt: "x", StreamOutput: true}, true)
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--output-format stream-json") {
+		t.Fatalf("args %v missing --output-format stream-json", args)
+	}
+	if !strings.Contains(joined, "--verbose") {
+		t.Fatalf("args %v missing --verbose (required by `claude -p` alongside stream-json)", args)
+	}
+	if strings.Contains(joined, "--output-format json") {
+		t.Fatalf("args %v should not also request the plain json format", args)
 	}
 }
 
@@ -361,6 +377,106 @@ func TestRun_ProbesMaxTurnsSupportOnceWhenUnknown(t *testing.T) {
 	}
 	if probeCalls != 1 {
 		t.Fatalf("got %d probe calls on second Run, want cached result (still 1)", probeCalls)
+	}
+}
+
+// --- Runner.Run with StreamOutput (real-time Dev streaming) ---------------
+
+type fakeStreamExec struct {
+	stdout, stderr, resultLine string
+	err                        error
+	gotArgs                    []string
+	gotStdin                   string
+	events                     []string
+}
+
+func (f *fakeStreamExec) run(ctx context.Context, workDir string, args []string, stdin string, onEvent streamEventLogger) (string, string, string, error) {
+	f.gotArgs = args
+	f.gotStdin = stdin
+	for _, e := range f.events {
+		onEvent(e)
+	}
+	return f.stdout, f.stderr, f.resultLine, f.err
+}
+
+func TestRun_StreamOutput_UsesStreamExecNotPlainExec(t *testing.T) {
+	fe := &fakeExec{stdout: `{"result": "should not be used", "is_error": false}`}
+	fse := &fakeStreamExec{
+		stdout:     "{\"type\":\"assistant\"}\n{\"type\":\"result\",\"result\":\"streamed\",\"is_error\":false,\"num_turns\":3,\"duration_ms\":2000}\n",
+		resultLine: `{"type":"result","result":"streamed","is_error":false,"num_turns":3,"duration_ms":2000}`,
+	}
+	r := &Runner{exec: fe.run, streamExec: fse.run, maxTurnsSupported: boolPtr(true)}
+
+	res, err := r.Run(context.Background(), ports.RunRequest{Prompt: "do it", StreamOutput: true})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(fe.gotArgs) != 0 {
+		t.Fatalf("plain exec was called (args %v); StreamOutput=true must use streamExec instead", fe.gotArgs)
+	}
+	if res.Output != "streamed" || !res.Success || res.NumTurns != 3 || res.DurationSec != 2 {
+		t.Fatalf("got %+v, want the parsed terminal result event", res)
+	}
+}
+
+func TestRun_StreamOutput_LogsEachSummarizedEventAsItArrives(t *testing.T) {
+	fse := &fakeStreamExec{
+		resultLine: `{"result":"ok","is_error":false,"num_turns":1}`,
+		events:     []string{"[Dev] executando: go test ./...", "[Dev] usando ferramenta Write em book.go"},
+	}
+	r := &Runner{streamExec: fse.run, maxTurnsSupported: boolPtr(true)}
+
+	var logBuf bytes.Buffer
+	prevOutput := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(prevOutput)
+		log.SetFlags(prevFlags)
+	}()
+
+	if _, err := r.Run(context.Background(), ports.RunRequest{Prompt: "x", StreamOutput: true}); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	got := logBuf.String()
+	for _, want := range fse.events {
+		if !strings.Contains(got, want) {
+			t.Errorf("log output missing streamed event %q\n--- full log ---\n%s", want, got)
+		}
+	}
+}
+
+func TestRun_StreamOutput_StillAccumulatesFullOutputForRateLimitDetection(t *testing.T) {
+	fse := &fakeStreamExec{
+		stdout: "some line\nYou've hit your session limit · resets 2:30am\n",
+	}
+	r := &Runner{streamExec: fse.run, maxTurnsSupported: boolPtr(true)}
+
+	res, err := r.Run(context.Background(), ports.RunRequest{Prompt: "x", StreamOutput: true})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if !res.RateLimited {
+		t.Fatalf("got RateLimited=false, want true: the accumulated stream output contains a rate limit marker")
+	}
+}
+
+func TestRun_WithoutStreamOutput_UsesPlainExecNotStreamExec(t *testing.T) {
+	fe := &fakeExec{stdout: `{"result": "42", "is_error": false, "num_turns": 1}`}
+	fse := &fakeStreamExec{}
+	r := &Runner{exec: fe.run, streamExec: fse.run, maxTurnsSupported: boolPtr(true)}
+
+	res, err := r.Run(context.Background(), ports.RunRequest{Prompt: "x"})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if fse.gotArgs != nil {
+		t.Fatalf("streamExec was called (args %v); default StreamOutput=false must use plain exec", fse.gotArgs)
+	}
+	if res.Output != "42" {
+		t.Fatalf("got %+v, want the plain json envelope result", res)
 	}
 }
 

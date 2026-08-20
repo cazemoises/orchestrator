@@ -21,6 +21,14 @@ type RunRequest struct {
 	// them). Only ever set for Dev calls - see loop.go's stepDev and
 	// claudecli's buildArgs for the reasoning.
 	SkipPermissions bool
+
+	// StreamOutput, when true, tells the runner to use `claude`'s
+	// `--output-format stream-json` instead of the default `json`, reading
+	// and summarizing each NDJSON event as it arrives instead of only
+	// seeing output once the whole call finishes. Only set for Dev calls,
+	// gated by Config.VerboseDevOutput (see loop.go's stepDev) - the PO's
+	// prompt/response are short enough that streaming adds nothing.
+	StreamOutput bool
 }
 
 // RunResult is what came back from an agent invocation.

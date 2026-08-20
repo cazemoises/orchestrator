@@ -41,6 +41,15 @@ type Config struct {
 	// GitCommitPrefix prefixes the generated commit message. Defaults to
 	// "feat: ".
 	GitCommitPrefix string
+
+	// VerboseDevOutput, when true, has the Dev call use `claude`'s
+	// `--output-format stream-json` (see ports.RunRequest.StreamOutput and
+	// claudecli's Runner.Run) so its tool use and reasoning are logged in
+	// real time instead of only being visible once the whole call returns.
+	// Only affects Dev calls - the PO's prompt/response are short enough
+	// that streaming adds nothing. Configurable via
+	// ORCH_VERBOSE_DEV_OUTPUT; defaults to false.
+	VerboseDevOutput bool
 }
 
 func (c *Config) applyDefaults() {
@@ -348,6 +357,9 @@ func (l *Loop) stepDev(ctx context.Context, state *domain.RunState) error {
 		// safety reasoning. Only the Dev call sets this; the PO never
 		// touches files, so it keeps normal permission prompts.
 		SkipPermissions: true,
+		// Only the Dev call streams: the PO's prompt/response are short
+		// enough that streaming adds nothing. See Config.VerboseDevOutput.
+		StreamOutput: l.Config.VerboseDevOutput,
 	}
 	res, err := l.callAgent(ctx, state, req)
 	if err != nil {

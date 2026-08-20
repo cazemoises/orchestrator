@@ -198,6 +198,7 @@ data/
 | `ORCH_PO_MODEL` | não | (default do CLI) | Modelo usado nas chamadas do PO. |
 | `ORCH_DEV_MODEL` | não | (default do CLI) | Modelo usado nas chamadas do Dev. |
 | `ORCH_NOTIFY_WEBHOOK` | não | (vazio = notificações vão pro stdout/log) | URL que recebe `POST {"message": "..."}` a cada notificação (rate limit, task bloqueada, push falhou, etc). Pense em plugar aqui um webhook de WhatsApp. |
+| `ORCH_VERBOSE_DEV_OUTPUT` | não | `false` | Se `true`, a chamada ao Dev usa `--output-format stream-json` e loga cada evento (tool use, comando executado, trechos de raciocínio) em tempo real, em vez de só o resultado final. Ver "Acompanhando o progresso em tempo real" abaixo. |
 
 `DevMaxTurns` (padrão 30) e as janelas de espera de rate limit
 (`RateLimitWaitMin`/`RateLimitWaitMax`, padrão 10min/90min) usam os
@@ -219,6 +220,49 @@ export ORCH_LOCAL_VERIFY_COMMAND="go build ./... && go vet ./..."
 terminar a operação em andamento com segurança — o checkpoint em
 `run_state.json` já reflete o progresso mais recente antes de qualquer
 chamada arriscada ser feita, então nada é perdido.
+
+## Acompanhando o progresso em tempo real
+
+Por padrão (`ORCH_VERBOSE_DEV_OUTPUT` não setado, ou `false`), o terminal já
+mostra o essencial de cada transição do loop conforme ela acontece — não só
+o resultado final do ciclo. Exemplo de uma rodada típica:
+
+```
+2026/08/20 12:00:00 orchestrator: PO analisando backlog e decidindo próxima tarefa...
+2026/08/20 12:00:04 orchestrator: PO decidiu: task=task-005 título="Adapter FileStorage: implementação em filesystem local"
+reasoning: próxima peça do domínio de persistência, sem dependência de outras tasks pendentes
+2026/08/20 12:00:04 orchestrator: Dev iniciando tarefa task-005: Adapter FileStorage: implementação em filesystem local (prompt: 1583 caracteres)
+2026/08/20 12:04:40 orchestrator: Dev terminou tarefa task-005: success=true duração=276.1s num_turns=18
+2026/08/20 12:04:40 orchestrator: PO avaliando o relatório do Dev...
+2026/08/20 12:04:44 orchestrator: PO avaliou task=task-005: veredito=accept
+reasoning: testes de roundtrip e path inexistente cobrem os critérios de aceite
+```
+
+Entre "Dev iniciando tarefa" e "Dev terminou tarefa" (a chamada mais longa
+do ciclo, minutos em vez de segundos), esse modo não mostra nada — é
+exatamente o intervalo que `ORCH_VERBOSE_DEV_OUTPUT=true` preenche.
+
+Com `ORCH_VERBOSE_DEV_OUTPUT=true`, a chamada ao Dev (só ao Dev — o PO
+continua em `--output-format json`, sem streaming, porque o prompt/resposta
+dele já são curtos o bastante pra não precisar) passa a usar
+`--output-format stream-json`, e cada evento do Dev é logado assim que
+chega, em vez de só depois que a chamada inteira termina:
+
+```
+2026/08/20 12:00:04 orchestrator: Dev iniciando tarefa task-005: Adapter FileStorage: implementação em filesystem local (prompt: 1583 caracteres)
+2026/08/20 12:00:07 [Dev] escrevendo o teste que falha antes de qualquer implementação, cobrindo roundtrip e path inexistente
+2026/08/20 12:00:09 [Dev] usando ferramenta Write em filestorage_test.go
+2026/08/20 12:00:12 [Dev] executando: go test ./internal/adapters/filestorage/...
+2026/08/20 12:00:35 [Dev] usando ferramenta Write em filestorage.go
+2026/08/20 12:00:38 [Dev] executando: go test ./internal/adapters/filestorage/...
+2026/08/20 12:00:41 [Dev] testes passam, implementação cobre os três casos pedidos
+2026/08/20 12:04:40 orchestrator: Dev terminou tarefa task-005: success=true duração=276.1s num_turns=18
+```
+
+Trechos de texto/raciocínio longos são truncados em 200 caracteres para não
+inundar o terminal; a saída completa continua sendo acumulada internamente
+como sempre, para o parse final do resultado — o streaming é só
+visibilidade, não substitui isso.
 
 ## Arquitetura
 
