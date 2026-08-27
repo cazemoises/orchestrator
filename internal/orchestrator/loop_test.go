@@ -759,6 +759,113 @@ func TestRun_LogsProgressAtEachTransition(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
+// resolveRateLimitWait (ResetAt vs generic exponential backoff)
+// ---------------------------------------------------------------------
+
+func TestResolveRateLimitWait_UsesResetAtPlusSafetyMarginWhenPresent(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	resetAt := now.Add(47 * time.Minute)
+
+	wait, usedResetAt := resolveRateLimitWait(now, &resetAt, 0, 10*time.Minute, 90*time.Minute)
+	if !usedResetAt {
+		t.Fatal("got usedResetAt=false, want true when resetAt is provided")
+	}
+	want := 47*time.Minute + 30*time.Second
+	if wait != want {
+		t.Fatalf("got wait %s, want %s (resetAt - now + 30s safety margin)", wait, want)
+	}
+}
+
+func TestResolveRateLimitWait_ClampsToSafetyMarginWhenResetAtAlreadyPassed(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	resetAt := now.Add(-5 * time.Minute) // shouldn't normally happen (parseResetTime rolls to tomorrow), guarded anyway
+
+	wait, usedResetAt := resolveRateLimitWait(now, &resetAt, 0, 10*time.Minute, 90*time.Minute)
+	if !usedResetAt {
+		t.Fatal("got usedResetAt=false, want true")
+	}
+	if wait != 30*time.Second {
+		t.Fatalf("got wait %s, want the 30s safety margin floor", wait)
+	}
+}
+
+func TestResolveRateLimitWait_FallsBackToExponentialBackoffWhenResetAtNil(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+
+	wait, usedResetAt := resolveRateLimitWait(now, nil, 7*time.Minute, 10*time.Minute, 90*time.Minute)
+	if usedResetAt {
+		t.Fatal("got usedResetAt=true, want false when resetAt is nil")
+	}
+	if wait != 3*time.Minute {
+		t.Fatalf("got wait %s, want 3m (computeWait fallback)", wait)
+	}
+}
+
+// ---------------------------------------------------------------------
+// waitOutRateLimit (periodic countdown logging)
+// ---------------------------------------------------------------------
+
+func TestWaitOutRateLimit_LogsPeriodicCountdownUntilSleepReturns(t *testing.T) {
+	loop := New(&fakeAgent{}, newFakeStore(nil), &fakeNotifier{}, newSuccessPusher(), testConfig())
+	loop.RateLimitLogInterval = 5 * time.Millisecond
+	loop.Sleep = func(ctx context.Context, d time.Duration) error {
+		time.Sleep(30 * time.Millisecond) // let a few ticks fire before Sleep returns
+		return nil
+	}
+
+	var logBuf bytes.Buffer
+	prevOutput := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(prevOutput)
+		log.SetFlags(prevFlags)
+	}()
+
+	resetAt := time.Now().Add(time.Hour)
+	if err := loop.waitOutRateLimit(context.Background(), 100*time.Millisecond, &resetAt); err != nil {
+		t.Fatalf("waitOutRateLimit returned error: %v", err)
+	}
+
+	got := logBuf.String()
+	if !strings.Contains(got, "aguardando reset às") || !strings.Contains(got, "faltam") {
+		t.Fatalf("expected at least one periodic countdown log line, got:\n%s", got)
+	}
+}
+
+func TestWaitOutRateLimit_StopsLoggingAssoonAsSleepReturns(t *testing.T) {
+	loop := New(&fakeAgent{}, newFakeStore(nil), &fakeNotifier{}, newSuccessPusher(), testConfig())
+	loop.RateLimitLogInterval = 5 * time.Millisecond
+	loop.Sleep = func(ctx context.Context, d time.Duration) error { return nil }
+
+	var logBuf bytes.Buffer
+	prevOutput := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+
+	if err := loop.waitOutRateLimit(context.Background(), 100*time.Millisecond, nil); err != nil {
+		t.Fatalf("waitOutRateLimit returned error: %v", err)
+	}
+
+	time.Sleep(20 * time.Millisecond) // long enough for a leaked ticker to have fired
+	log.SetOutput(prevOutput)
+	log.SetFlags(prevFlags)
+
+	if logBuf.Len() != 0 {
+		t.Fatalf("got log output %q after Sleep returned immediately, want none (ticker must stop via the done channel)", logBuf.String())
+	}
+}
+
+func TestNew_DefaultsRateLimitLogIntervalToOneMinute(t *testing.T) {
+	loop := New(&fakeAgent{}, newFakeStore(nil), &fakeNotifier{}, newSuccessPusher(), testConfig())
+	if loop.RateLimitLogInterval != time.Minute {
+		t.Fatalf("got %s, want 1m default", loop.RateLimitLogInterval)
+	}
+}
+
+// ---------------------------------------------------------------------
 // checkpointing
 // ---------------------------------------------------------------------
 
@@ -896,5 +1003,121 @@ func TestRun_RateLimitResume_ComputesRemainingWaitFromExistingTimestamp(t *testi
 
 	if len(sleptFor) != 1 || sleptFor[0] != 3*time.Minute {
 		t.Fatalf("got sleptFor %v, want a single 3m wait (10m min - 7m already elapsed)", sleptFor)
+	}
+}
+
+func TestRun_RateLimited_WithResetAt_WaitsUntilResetPlusSafetyMargin(t *testing.T) {
+	fixedNow := time.Unix(1700000000, 0)
+	resetAt := fixedNow.Add(47 * time.Minute)
+
+	store := newFakeStore(nil)
+	notifier := &fakeNotifier{}
+
+	agent := &fakeAgent{}
+	agent.respond = func(idx int, req ports.RunRequest) (ports.RunResult, error) {
+		switch idx {
+		case 0:
+			return ports.RunResult{RateLimited: true, ResetAt: &resetAt}, nil
+		case 1:
+			return ports.RunResult{Output: `{"action":"product_done","reasoning":"x"}`}, nil
+		default:
+			t.Fatalf("unexpected agent call #%d", idx)
+			return ports.RunResult{}, nil
+		}
+	}
+
+	var sleptFor []time.Duration
+	loop := newTestLoop(agent, store, notifier, newSuccessPusher(), testConfig())
+	loop.Sleep = func(ctx context.Context, d time.Duration) error {
+		sleptFor = append(sleptFor, d)
+		return nil
+	}
+
+	if err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	want := 47*time.Minute + 30*time.Second
+	if len(sleptFor) != 1 || sleptFor[0] != want {
+		t.Fatalf("got sleptFor %v, want a single wait of %s (resetAt - now + safety margin)", sleptFor, want)
+	}
+}
+
+func TestRun_RateLimited_LogsResetAtPathWhenAvailable(t *testing.T) {
+	fixedNow := time.Unix(1700000000, 0)
+	resetAt := fixedNow.Add(47 * time.Minute)
+
+	store := newFakeStore(nil)
+	notifier := &fakeNotifier{}
+
+	agent := &fakeAgent{}
+	agent.respond = func(idx int, req ports.RunRequest) (ports.RunResult, error) {
+		switch idx {
+		case 0:
+			return ports.RunResult{RateLimited: true, ResetAt: &resetAt}, nil
+		case 1:
+			return ports.RunResult{Output: `{"action":"product_done","reasoning":"x"}`}, nil
+		default:
+			t.Fatalf("unexpected agent call #%d", idx)
+			return ports.RunResult{}, nil
+		}
+	}
+
+	var logBuf bytes.Buffer
+	prevOutput := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(prevOutput)
+		log.SetFlags(prevFlags)
+	}()
+
+	loop := newTestLoop(agent, store, notifier, newSuccessPusher(), testConfig())
+	if err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	got := logBuf.String()
+	if !strings.Contains(got, "aguardando até reset real") {
+		t.Errorf("log output missing the resetAt-path message, got:\n%s", got)
+	}
+}
+
+func TestRun_RateLimited_LogsBackoffPathWhenResetAtUnavailable(t *testing.T) {
+	store := newFakeStore(nil)
+	notifier := &fakeNotifier{}
+
+	agent := &fakeAgent{}
+	agent.respond = func(idx int, req ports.RunRequest) (ports.RunResult, error) {
+		switch idx {
+		case 0:
+			return ports.RunResult{RateLimited: true}, nil
+		case 1:
+			return ports.RunResult{Output: `{"action":"product_done","reasoning":"x"}`}, nil
+		default:
+			t.Fatalf("unexpected agent call #%d", idx)
+			return ports.RunResult{}, nil
+		}
+	}
+
+	var logBuf bytes.Buffer
+	prevOutput := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(prevOutput)
+		log.SetFlags(prevFlags)
+	}()
+
+	loop := newTestLoop(agent, store, notifier, newSuccessPusher(), testConfig())
+	if err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	got := logBuf.String()
+	if !strings.Contains(got, "usando backoff exponencial") {
+		t.Errorf("log output missing the backoff-fallback message, got:\n%s", got)
 	}
 }

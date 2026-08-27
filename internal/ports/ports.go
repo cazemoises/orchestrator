@@ -4,6 +4,7 @@ package ports
 
 import (
 	"context"
+	"time"
 
 	"orchestrator/internal/domain"
 )
@@ -39,6 +40,13 @@ type RunResult struct {
 	ErrorMsg    string
 	DurationSec float64
 	NumTurns    int
+
+	// ResetAt is when the current rate-limit window resets, if the CLI's
+	// rate-limit message included that information and it could be parsed
+	// (see claudecli's parseResetTime). Only ever set when RateLimited is
+	// true; nil means the caller must fall back to a generic backoff
+	// schedule instead (see orchestrator/loop.go's resolveRateLimitWait).
+	ResetAt *time.Time
 }
 
 // AgentRunner invokes an autonomous coding agent (the Claude Code CLI, in

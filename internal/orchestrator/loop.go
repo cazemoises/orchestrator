@@ -84,25 +84,30 @@ type Loop struct {
 	Pusher   ports.GitPusher
 	Config   Config
 
-	// Now, Sleep and Verify are seams for testing; production code leaves
-	// them at their New()-assigned defaults.
+	// Now, Sleep, Verify and RateLimitLogInterval are seams for testing;
+	// production code leaves them at their New()-assigned defaults.
 	Now    func() time.Time
 	Sleep  func(ctx context.Context, d time.Duration) error
 	Verify func(ctx context.Context, dir, command string) (stdout, stderr string, err error)
+
+	// RateLimitLogInterval controls how often waitOutRateLimit logs a
+	// countdown while waiting out a rate limit. Defaults to time.Minute.
+	RateLimitLogInterval time.Duration
 }
 
 // New creates a Loop with defaults applied to Config and real time/sleep/verify.
 func New(agent ports.AgentRunner, store ports.MemoryStore, notifier ports.Notifier, pusher ports.GitPusher, cfg Config) *Loop {
 	cfg.applyDefaults()
 	return &Loop{
-		Agent:    agent,
-		Store:    store,
-		Notifier: notifier,
-		Pusher:   pusher,
-		Config:   cfg,
-		Now:      time.Now,
-		Sleep:    realSleep,
-		Verify:   realVerify,
+		Agent:                agent,
+		Store:                store,
+		Notifier:             notifier,
+		Pusher:               pusher,
+		Config:               cfg,
+		Now:                  time.Now,
+		Sleep:                realSleep,
+		Verify:               realVerify,
+		RateLimitLogInterval: time.Minute,
 	}
 }
 
@@ -143,6 +148,71 @@ func realVerify(ctx context.Context, dir, command string) (string, string, error
 
 	err := cmd.Run()
 	return stdout.String(), stderr.String(), err
+}
+
+// rateLimitSafetyMargin is added on top of the CLI-reported reset time
+// before retrying, so the retry lands safely after the CLI's own clock has
+// rolled over instead of racing it.
+const rateLimitSafetyMargin = 30 * time.Second
+
+// resolveRateLimitWait decides how long to wait before the next retry and
+// whether it used the CLI's own reset time (resetAt, extracted from the
+// rate-limit message - see claudecli's parseResetTime) or the generic
+// elapsed-based exponential backoff. Preferring resetAt is the whole point
+// of this function: a raw exponential backoff previously left the
+// orchestrator waiting almost 12h blind, with no idea when it would
+// actually resume, even though the CLI's message had told it the exact
+// reset time all along.
+func resolveRateLimitWait(now time.Time, resetAt *time.Time, elapsed, min, max time.Duration) (wait time.Duration, usedResetAt bool) {
+	if resetAt != nil {
+		wait = resetAt.Sub(now) + rateLimitSafetyMargin
+		if wait < rateLimitSafetyMargin {
+			wait = rateLimitSafetyMargin
+		}
+		return wait, true
+	}
+	return computeWait(elapsed, min, max), false
+}
+
+// waitOutRateLimit sleeps for wait, logging a countdown every
+// RateLimitLogInterval (via a time.Ticker, stopped the instant the wait
+// ends) so a human watching the terminal always knows how much longer
+// remains and, when resetAt is known, the exact clock time it's waiting
+// for - instead of going dark for the whole wait, which is what happened
+// before resolveRateLimitWait existed.
+func (l *Loop) waitOutRateLimit(ctx context.Context, wait time.Duration, resetAt *time.Time) error {
+	interval := l.RateLimitLogInterval
+	if interval <= 0 {
+		interval = time.Minute
+	}
+
+	deadline := l.Now().Add(wait)
+	done := make(chan struct{})
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				remaining := deadline.Sub(l.Now())
+				if remaining <= 0 {
+					return
+				}
+				if resetAt != nil {
+					log.Printf("orchestrator: aguardando reset às %s (faltam %s)", resetAt.Format("15:04"), remaining.Round(time.Second))
+				} else {
+					log.Printf("orchestrator: aguardando backoff exponencial (faltam %s)", remaining.Round(time.Second))
+				}
+			}
+		}
+	}()
+
+	err := l.Sleep(ctx, wait)
+	close(done)
+	return err
 }
 
 // computeWait implements the resumable exponential backoff: given how much
@@ -251,14 +321,19 @@ func (l *Loop) callAgent(ctx context.Context, state *domain.RunState, req ports.
 		}
 
 		elapsed := now.Sub(*state.RateLimitedAt)
-		wait := computeWait(elapsed, l.Config.RateLimitWaitMin, l.Config.RateLimitWaitMax)
-		log.Printf("orchestrator: rate limited - esperando mais %s antes de tentar de novo (limitado desde %s, %s decorrido até agora)",
-			wait, state.RateLimitedAt.Format(time.RFC3339), elapsed.Round(time.Second))
+		wait, usedResetAt := resolveRateLimitWait(now, res.ResetAt, elapsed, l.Config.RateLimitWaitMin, l.Config.RateLimitWaitMax)
+		if usedResetAt {
+			log.Printf("orchestrator: rate limited - aguardando até reset real às %s (faltam %s)",
+				res.ResetAt.Format("15:04"), wait.Round(time.Second))
+		} else {
+			log.Printf("orchestrator: rate limited - reset time não encontrado na mensagem, usando backoff exponencial: esperando mais %s (limitado desde %s, %s decorrido até agora)",
+				wait, state.RateLimitedAt.Format(time.RFC3339), elapsed.Round(time.Second))
+		}
 		_ = l.Notifier.Notify(ctx, fmt.Sprintf(
 			"Claude Code rate limited; waiting %s before retrying (rate-limited since %s)",
 			wait, state.RateLimitedAt.Format(time.RFC3339)))
 
-		if err := l.Sleep(ctx, wait); err != nil {
+		if err := l.waitOutRateLimit(ctx, wait, res.ResetAt); err != nil {
 			return ports.RunResult{}, err
 		}
 	}

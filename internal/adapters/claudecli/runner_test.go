@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 	"testing"
+	"time"
 
 	"orchestrator/internal/ports"
 )
@@ -156,6 +157,75 @@ func TestParseEnvelope_ParsesSuccessfulResult(t *testing.T) {
 func TestParseEnvelope_ReturnsErrorOnInvalidJSON(t *testing.T) {
 	if _, err := parseEnvelope("not json at all"); err == nil {
 		t.Fatal("expected error for invalid JSON, got nil")
+	}
+}
+
+// --- parseResetTime ---------------------------------------------------
+
+func TestParseResetTime_ParsesTimeInGivenTimezone_WhenStillInTheFuture(t *testing.T) {
+	loc, err := time.LoadLocation("America/Sao_Paulo")
+	if err != nil {
+		t.Fatalf("failed to load test timezone: %v", err)
+	}
+	now := time.Date(2026, 8, 27, 1, 0, 0, 0, loc) // 1:00am - 2:30am reset is still ahead today
+	msg := "You've hit your session limit · resets 2:30am (America/Sao_Paulo)"
+
+	got := parseResetTime(msg, now)
+	if got == nil {
+		t.Fatal("parseResetTime returned nil, want a parsed time")
+	}
+	want := time.Date(2026, 8, 27, 2, 30, 0, 0, loc)
+	if !got.Equal(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestParseResetTime_RollsToTomorrowWhenTimeAlreadyPassedToday(t *testing.T) {
+	loc, err := time.LoadLocation("America/Sao_Paulo")
+	if err != nil {
+		t.Fatalf("failed to load test timezone: %v", err)
+	}
+	now := time.Date(2026, 8, 27, 5, 0, 0, 0, loc) // 5:00am - 2:30am reset already happened today
+	msg := "You've hit your session limit · resets 2:30am (America/Sao_Paulo)"
+
+	got := parseResetTime(msg, now)
+	if got == nil {
+		t.Fatal("parseResetTime returned nil, want a parsed time")
+	}
+	want := time.Date(2026, 8, 28, 2, 30, 0, 0, loc)
+	if !got.Equal(want) {
+		t.Fatalf("got %v, want %v (rolled to tomorrow)", got, want)
+	}
+}
+
+func TestParseResetTime_HandlesPMTimes(t *testing.T) {
+	loc, err := time.LoadLocation("UTC")
+	if err != nil {
+		t.Fatalf("failed to load test timezone: %v", err)
+	}
+	now := time.Date(2026, 8, 27, 10, 0, 0, 0, loc)
+	msg := "You've hit your session limit · resets 3:15pm (UTC)"
+
+	got := parseResetTime(msg, now)
+	if got == nil {
+		t.Fatal("parseResetTime returned nil, want a parsed time")
+	}
+	want := time.Date(2026, 8, 27, 15, 15, 0, 0, loc)
+	if !got.Equal(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestParseResetTime_ReturnsNilWhenMessageHasNoResetMarker(t *testing.T) {
+	if got := parseResetTime("here is the result of your task, all good", time.Now()); got != nil {
+		t.Fatalf("got %v, want nil for a message with no reset time", got)
+	}
+}
+
+func TestParseResetTime_ReturnsNilForUnknownTimezone(t *testing.T) {
+	msg := "resets 2:30am (Not/A_Real_Zone)"
+	if got := parseResetTime(msg, time.Now()); got != nil {
+		t.Fatalf("got %v, want nil for an unparseable timezone", got)
 	}
 }
 
@@ -477,6 +547,59 @@ func TestRun_WithoutStreamOutput_UsesPlainExecNotStreamExec(t *testing.T) {
 	}
 	if res.Output != "42" {
 		t.Fatalf("got %+v, want the plain json envelope result", res)
+	}
+}
+
+// --- Runner.Run: ResetAt population on RateLimited results -----------------
+
+func TestRun_RateLimited_PopulatesResetAtWhenMessageParses(t *testing.T) {
+	fe := &fakeExec{stdout: "You've hit your session limit · resets 2:30am (America/Sao_Paulo)"}
+	r := &Runner{exec: fe.run, maxTurnsSupported: boolPtr(true)}
+
+	res, err := r.Run(context.Background(), ports.RunRequest{Prompt: "x"})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if !res.RateLimited {
+		t.Fatalf("got RateLimited=false, want true")
+	}
+	if res.ResetAt == nil {
+		t.Fatal("got ResetAt=nil, want it populated from the parsed message")
+	}
+}
+
+func TestRun_RateLimited_LeavesResetAtNilWhenMessageDoesNotParse(t *testing.T) {
+	fe := &fakeExec{stdout: "Error: usage limit reached for this account"}
+	r := &Runner{exec: fe.run, maxTurnsSupported: boolPtr(true)}
+
+	res, err := r.Run(context.Background(), ports.RunRequest{Prompt: "x"})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if !res.RateLimited {
+		t.Fatalf("got RateLimited=false, want true")
+	}
+	if res.ResetAt != nil {
+		t.Fatalf("got ResetAt=%v, want nil when the message has no parseable reset time", res.ResetAt)
+	}
+}
+
+func TestRun_RateLimited_UsesInjectedNowToResolveResetAt(t *testing.T) {
+	loc, err := time.LoadLocation("America/Sao_Paulo")
+	if err != nil {
+		t.Fatalf("failed to load test timezone: %v", err)
+	}
+	fixedNow := time.Date(2026, 8, 27, 1, 0, 0, 0, loc)
+	fe := &fakeExec{stdout: "You've hit your session limit · resets 2:30am (America/Sao_Paulo)"}
+	r := &Runner{exec: fe.run, maxTurnsSupported: boolPtr(true), now: func() time.Time { return fixedNow }}
+
+	res, err := r.Run(context.Background(), ports.RunRequest{Prompt: "x"})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	want := time.Date(2026, 8, 27, 2, 30, 0, 0, loc)
+	if res.ResetAt == nil || !res.ResetAt.Equal(want) {
+		t.Fatalf("got ResetAt=%v, want %v", res.ResetAt, want)
 	}
 }
 

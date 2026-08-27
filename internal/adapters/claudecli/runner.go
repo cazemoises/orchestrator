@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"orchestrator/internal/ports"
 )
@@ -45,6 +47,57 @@ func isRateLimited(combinedOutput string) bool {
 		}
 	}
 	return false
+}
+
+// resetTimeRegex matches the reset time embedded in Claude Code's rate
+// limit message, e.g. "You've hit your session limit · resets 2:30am
+// (America/Sao_Paulo)" - capturing the hour, minute, am/pm, and IANA
+// timezone name.
+var resetTimeRegex = regexp.MustCompile(`(?i)resets (\d{1,2}):(\d{2})\s*(am|pm) \(([^)]+)\)`)
+
+// parseResetTime extracts the reset time embedded in a rate-limit message
+// (see resetTimeRegex) and resolves it to a concrete time.Time in the
+// message's own timezone, relative to now. Resets are daily: if the clock
+// time named in the message has already passed today, it must mean
+// tomorrow's reset, not today's already-elapsed one.
+//
+// Returns nil if the message doesn't contain a recognizable reset time
+// (unknown wording, unparseable timezone, etc) - callers must fall back to
+// a generic backoff schedule in that case (see orchestrator/loop.go's
+// resolveRateLimitWait). This is what lets the orchestrator wait until the
+// CLI's own stated reset time instead of a blind exponential backoff that
+// once left it waiting almost 12h with no idea when it would actually
+// resume.
+func parseResetTime(message string, now time.Time) *time.Time {
+	m := resetTimeRegex.FindStringSubmatch(message)
+	if m == nil {
+		return nil
+	}
+
+	hour, err := strconv.Atoi(m[1])
+	if err != nil || hour < 1 || hour > 12 {
+		return nil
+	}
+	minute, err := strconv.Atoi(m[2])
+	if err != nil || minute < 0 || minute > 59 {
+		return nil
+	}
+	loc, err := time.LoadLocation(m[4])
+	if err != nil {
+		return nil
+	}
+
+	hour24 := hour % 12
+	if strings.ToLower(m[3]) == "pm" {
+		hour24 += 12
+	}
+
+	nowInLoc := now.In(loc)
+	resetAt := time.Date(nowInLoc.Year(), nowInLoc.Month(), nowInLoc.Day(), hour24, minute, 0, 0, loc)
+	if !resetAt.After(nowInLoc) {
+		resetAt = resetAt.AddDate(0, 0, 1)
+	}
+	return &resetAt
 }
 
 // envelope is the subset of `claude -p --output-format json`'s output that
@@ -197,11 +250,16 @@ type Runner struct {
 	streamExec        streamExecFunc
 	helpFunc          func(ctx context.Context) (string, error)
 	maxTurnsSupported *bool
+
+	// now is a seam for testing parseResetTime's today-vs-tomorrow
+	// resolution deterministically; production code leaves it nil and
+	// Run defaults it to time.Now.
+	now func() time.Time
 }
 
 // NewRunner creates a Runner that shells out to the real `claude` binary.
 func NewRunner() *Runner {
-	return &Runner{exec: runViaOSExec, streamExec: runViaOSExecStreaming}
+	return &Runner{exec: runViaOSExec, streamExec: runViaOSExecStreaming, now: time.Now}
 }
 
 func (r *Runner) probeMaxTurnsSupport(ctx context.Context) bool {
@@ -260,12 +318,18 @@ func (r *Runner) Run(ctx context.Context, req ports.RunRequest) (ports.RunResult
 		return ports.RunResult{}, fmt.Errorf("claudecli: running claude: %w", err)
 	}
 
+	nowFn := r.now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+
 	combined := stdout + "\n" + stderr
 	if isRateLimited(combined) {
 		return ports.RunResult{
 			RateLimited: true,
 			Output:      stdout,
 			ErrorMsg:    "rate limited",
+			ResetAt:     parseResetTime(combined, nowFn()),
 		}, nil
 	}
 
@@ -294,6 +358,7 @@ func (r *Runner) Run(ctx context.Context, req ports.RunRequest) (ports.RunResult
 			Success:     false,
 			Output:      stdout,
 			ErrorMsg:    err.Error(),
+			ResetAt:     parseResetTime(combined, nowFn()),
 		}, nil
 	}
 
