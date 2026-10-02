@@ -1,4 +1,4 @@
-# orchestrator
+# elo.ai orchestrator
 
 Loop autônomo em Go que orquestra duas invocações do [Claude Code
 CLI](https://docs.claude.com/claude-code) (`claude -p`) — uma no papel de
@@ -9,11 +9,10 @@ de execução) é persistida em disco, então o loop sobrevive a crashes do
 processo, reinícios da máquina e aos rate limits da assinatura Claude
 Pro/Max.
 
-**O orchestrator roda localmente** (Windows via WSL2), contra um clone
-local do repo alvo (`pdf-reader`) — ele nunca roda na VM. O único jeito de
-código chegar na VM é: o PO aceita uma task → o orchestrator roda uma
-verificação local → commit + push → o CI/CD do `pdf-reader` (self-hosted
-runner na VM) builda e deploya. Veja "Arquitetura de deploy" abaixo.
+**O orchestrator roda localmente**, contra um clone local do repo alvo
+(`elo-ai`) — ele nunca roda na VM. O único jeito de código chegar no ambiente
+remoto é: o PO aceita uma task → o orchestrator roda uma verificação local →
+commit + push → o CI/CD do `elo-ai` builda e deploya.
 
 Só usa a biblioteca padrão do Go — sem dependências externas.
 
@@ -23,7 +22,7 @@ Só usa a biblioteca padrão do Go — sem dependências externas.
 orchestrator (local, WSL2)          VM Ubuntu
 ┌─────────────────────────┐         ┌──────────────────────────┐
 │ loop PO/Dev              │  push   │ self-hosted runner        │
-│  accept → verify → ──────┼────────▶│  pdf-reader CI/CD          │
+│  accept → verify → ──────┼────────▶│  elo.ai CI/CD              │
 │  git commit + push       │         │  docker build/compose up  │
 └─────────────────────────┘         └──────────────────────────┘
 ```
@@ -31,9 +30,9 @@ orchestrator (local, WSL2)          VM Ubuntu
 O orchestrator em si NÃO tem mais workflow de deploy nem systemd unit —
 eles existiam quando o orchestrator rodava na VM e foram removidos (ver
 `deploy/setup-runner.md`, que hoje documenta o runner só para o repo
-`pdf-reader`). Ele lê e escreve arquivos em `ORCH_REPO_DIR`, que deve
-apontar para o seu clone LOCAL de `pdf-reader` (ex:
-`~/projects/pdf-reader/backend`), não para um caminho na VM.
+`elo-ai`). Ele lê e escreve arquivos em `ORCH_REPO_DIR`, que deve
+apontar para o seu clone LOCAL de `elo-ai` (ex:
+`~/projects/elo-ai`), não para um caminho na VM.
 
 ## Guardrail: nunca dar push de código quebrado
 
@@ -149,10 +148,11 @@ Da mesma forma, `git push` precisa já funcionar manualmente na sua
 máquina (credenciais/SSH key configuradas) ANTES de rodar o loop — o
 adapter `gitcli` não gerencia autenticação, só chama `git`.
 
-## Preparando `data/` para um projeto novo
+## Preparando `data-elo-ai/`
 
-O orchestrator lê e escreve tudo sob `ORCH_DATA_DIR`. Para apontar o
-orchestrator para um novo projeto (ex: pdf-reader):
+O orchestrator lê e escreve tudo sob `ORCH_DATA_DIR`. O checkout já vem
+configurado para continuar o `elo.ai` usando `data-elo-ai/`. Para apontar o
+orchestrator para outro projeto, defina `ORCH_REPO_DIR` e `ORCH_DATA_DIR`:
 
 ```bash
 mkdir -p /caminho/para/data
@@ -188,12 +188,12 @@ data/
 | Variável | Obrigatória | Default | Descrição |
 |---|---|---|---|
 | `CLAUDE_CODE_OAUTH_TOKEN` | sim | — | Token de `claude setup-token`. Lido pelo próprio binário `claude`, não pelo orchestrator. |
-| `ORCH_REPO_DIR` | não | `.` | Diretório de trabalho onde o Dev/PO rodam E onde o commit+push acontece — o seu clone LOCAL de `pdf-reader/backend` (ou outro subdiretório, conforme o backlog avança). |
-| `ORCH_DATA_DIR` | não | `./data` | Raiz da memória persistida (vision/state/backlog/history/run_state). |
+| `ORCH_REPO_DIR` | não | `..\elo-ai` | Diretório de trabalho onde o Dev/PO rodam e onde o commit+push acontece — o clone LOCAL de `elo-ai`. |
+| `ORCH_DATA_DIR` | não | `.\data-elo-ai` | Raiz da memória persistida do `elo.ai` (vision/state/backlog/history/run_state). |
 | `ORCH_MAX_ATTEMPTS_PER_TASK` | não | `3` | Quantas rejeições seguidas (do PO OU do LocalVerifyCommand) antes de marcar a task como `blocked` e parar. |
 | `ORCH_MAX_TASKS_PER_CYCLE` | não | `0` (sem limite) | Se >0, o processo para de pegar tasks novas após completar esse número num único `Run`, mantendo a fase em `po_deciding` para retomar depois. |
 | `ORCH_DEV_ALLOWED_TOOLS` | não | (vazio = política padrão do CLI) | Lista separada por vírgula de tools permitidas ao Dev (ex: `Bash,Edit,Read,Write`). Recomendado sempre definir. |
-| `ORCH_LOCAL_VERIFY_COMMAND` | não | (vazio = pula a verificação, não recomendado) | Comando rodado em `ORCH_REPO_DIR` antes de todo commit+push — via `cmd /C` no Windows, via `sh -c` em outros sistemas (`buildVerifyCommand` em `loop.go` decide isso a partir de `runtime.GOOS`, sem depender de `sh.exe` estar no PATH do Windows, que frequentemente não está mesmo com Git instalado). Ex: `go build ./... && go vet ./...` quando `ORCH_REPO_DIR` for `pdf-reader/backend`; ajuste para `npm run build` (frontend) ou o equivalente do extractor conforme o backlog cobrir outras partes do repo. **O comando precisa usar sintaxe compatível com o interpretador do SO onde o orquestrador roda** — `cmd.exe` no Windows tem sutilezas diferentes de `sh` (ex: encadeamento com `&&` funciona nos dois, mas redirecionamento, aspas e variáveis de ambiente têm sintaxes distintas). Teste o comando manualmente no terminal (PowerShell/cmd no Windows, bash/sh em outros sistemas) antes de configurá-lo via env var. |
+| `ORCH_LOCAL_VERIFY_COMMAND` | não | (vazio = pula a verificação, não recomendado) | Comando rodado em `ORCH_REPO_DIR` antes de todo commit+push — via `cmd /C` no Windows, via `sh -c` em outros sistemas (`buildVerifyCommand` em `loop.go` decide isso a partir de `runtime.GOOS`). Para o `elo-ai`, use `go build ./... && go vet ./...`; ajuste para `npm run build` ao validar o frontend. **O comando precisa usar sintaxe compatível com o interpretador do SO onde o orquestrador roda.** |
 | `ORCH_GIT_COMMIT_PREFIX` | não | `feat: ` | Prefixo da mensagem de commit gerada (`<prefixo><título da task>\n\n<reasoning do PO>`). |
 | `ORCH_PO_MODEL` | não | (default do CLI) | Modelo usado nas chamadas do PO. |
 | `ORCH_DEV_MODEL` | não | (default do CLI) | Modelo usado nas chamadas do Dev. |
@@ -209,8 +209,8 @@ ainda; ajuste o código se precisar mudar.
 
 ```bash
 export CLAUDE_CODE_OAUTH_TOKEN=...
-export ORCH_REPO_DIR=~/projects/pdf-reader/backend
-export ORCH_DATA_DIR=~/projects/orchestrator/data
+export ORCH_REPO_DIR=~/projects/elo-ai
+export ORCH_DATA_DIR=~/projects/orchestrator/data-elo-ai
 export ORCH_DEV_ALLOWED_TOOLS="Bash,Edit,Read,Write,Glob,Grep"
 export ORCH_LOCAL_VERIFY_COMMAND="go build ./... && go vet ./..."
 ./bin/orchestrator

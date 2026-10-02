@@ -69,8 +69,8 @@ func TestCommitAndPush_PushesWhenThereAreChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CommitAndPush returned error: %v", err)
 	}
-	if !res.Pushed || res.Skipped {
-		t.Fatalf("got %+v, want Pushed=true Skipped=false", res)
+	if !res.Pushed || !res.CommitCreated {
+		t.Fatalf("got %+v, want Pushed=true CommitCreated=true", res)
 	}
 	if res.CommitHash == "" {
 		t.Fatal("expected a non-empty CommitHash")
@@ -85,7 +85,7 @@ func TestCommitAndPush_PushesWhenThereAreChanges(t *testing.T) {
 	}
 }
 
-func TestCommitAndPush_SkipsWhenNoChanges(t *testing.T) {
+func TestCommitAndPush_SkipsWhenNoChangesAndNothingAheadOfRemote(t *testing.T) {
 	repoDir, remoteDir := newTestRepoWithRemote(t)
 	before := remoteHead(t, remoteDir)
 
@@ -97,13 +97,56 @@ func TestCommitAndPush_SkipsWhenNoChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CommitAndPush returned error: %v", err)
 	}
-	if !res.Skipped || res.Pushed {
-		t.Fatalf("got %+v, want Skipped=true Pushed=false", res)
+	if res.CommitCreated || res.Pushed {
+		t.Fatalf("got %+v, want CommitCreated=false Pushed=false", res)
 	}
 
 	after := remoteHead(t, remoteDir)
 	if after != before {
-		t.Fatal("expected remote HEAD to stay the same when there was nothing to commit")
+		t.Fatal("expected remote HEAD to stay the same when there was nothing to commit or push")
+	}
+}
+
+// TestCommitAndPush_PushesPreExistingCommitsWhenWorkingTreeCleanButAheadOfRemote
+// reproduces the real bug: the Dev agent commits its own work directly via
+// Bash (normal practice - its prompt asks for atomic commits), leaving the
+// working tree clean by the time CommitAndPush runs. A clean working tree
+// alone must not be read as "nothing to push" - HEAD can still be ahead of
+// the remote-tracking branch, and those commits must go out too.
+func TestCommitAndPush_PushesPreExistingCommitsWhenWorkingTreeCleanButAheadOfRemote(t *testing.T) {
+	repoDir, remoteDir := newTestRepoWithRemote(t)
+	before := remoteHead(t, remoteDir)
+
+	// Simulate the Dev agent committing its own work directly, out-of-band
+	// from CommitAndPush, and never pushing it itself.
+	if err := os.WriteFile(filepath.Join(repoDir, "dev-work.txt"), []byte("done\n"), 0o644); err != nil {
+		t.Fatalf("writing dev-work.txt: %v", err)
+	}
+	runGitT(t, repoDir, "add", "-A")
+	runGitT(t, repoDir, "commit", "-m", "dev: implement the task")
+	devCommitHash := strings.TrimSpace(runGitT(t, repoDir, "rev-parse", "HEAD"))
+
+	p := &Pusher{}
+	res, err := p.CommitAndPush(context.Background(), ports.PushRequest{
+		RepoDir:       repoDir,
+		CommitMessage: "feat: nothing changed",
+	})
+	if err != nil {
+		t.Fatalf("CommitAndPush returned error: %v", err)
+	}
+	if !res.Pushed || res.CommitCreated {
+		t.Fatalf("got %+v, want Pushed=true CommitCreated=false", res)
+	}
+	if res.CommitHash != devCommitHash {
+		t.Fatalf("got CommitHash %q, want the Dev agent's own commit %q", res.CommitHash, devCommitHash)
+	}
+
+	after := remoteHead(t, remoteDir)
+	if after == before {
+		t.Fatal("expected remote HEAD to move to the Dev agent's pre-existing commit, it didn't")
+	}
+	if after != devCommitHash {
+		t.Fatalf("remote HEAD = %q, want it to match the Dev agent's commit %q", after, devCommitHash)
 	}
 }
 

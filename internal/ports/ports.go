@@ -80,11 +80,16 @@ type PushRequest struct {
 	CommitMessage string
 }
 
-// PushResult is what happened as a result of a PushRequest.
+// PushResult is what happened as a result of a PushRequest. CommitCreated
+// and Pushed are independent axes: the working tree can be clean (nothing
+// for CommitAndPush itself to commit) while HEAD still sits ahead of the
+// remote-tracking branch - e.g. the Dev agent already committed its own
+// work directly via Bash - in which case CommitCreated is false but Pushed
+// is still true, since those commits still need to reach origin.
 type PushResult struct {
-	Pushed     bool
-	CommitHash string
-	Skipped    bool // true if there were no changes to commit
+	Pushed        bool
+	CommitCreated bool
+	CommitHash    string
 }
 
 // GitPusher commits and pushes whatever changes are sitting in a repo's
@@ -92,9 +97,10 @@ type PushResult struct {
 // reaches the CI/CD pipeline.
 type GitPusher interface {
 	// CommitAndPush runs `git add -A`, commits if there are changes, and
-	// pushes. It returns Skipped=true (not an error) if there was nothing
-	// to commit. Any real git failure (conflict, rejected push, missing
-	// credentials) is returned as a non-nil error - it must never fail
-	// silently.
+	// pushes whenever HEAD is ahead of the remote-tracking branch - even if
+	// this call itself created no commit, since a clean working tree does
+	// not mean there is nothing left to push. Any real git failure
+	// (conflict, rejected push, missing credentials) is returned as a
+	// non-nil error - it must never fail silently.
 	CommitAndPush(ctx context.Context, req PushRequest) (PushResult, error)
 }

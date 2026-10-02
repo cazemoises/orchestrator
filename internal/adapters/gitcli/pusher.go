@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"orchestrator/internal/ports"
@@ -49,12 +50,13 @@ func (p *Pusher) CommitAndPush(ctx context.Context, req ports.PushRequest) (port
 	if err != nil {
 		return ports.PushResult{}, fmt.Errorf("gitcli: git status --porcelain failed: %w (stderr: %s)", err, stderr)
 	}
-	if strings.TrimSpace(statusOut) == "" {
-		return ports.PushResult{Skipped: true}, nil
-	}
 
-	if _, stderr, err := p.run(ctx, req.RepoDir, "commit", "-m", req.CommitMessage); err != nil {
-		return ports.PushResult{}, fmt.Errorf("gitcli: git commit failed: %w (stderr: %s)", err, stderr)
+	commitCreated := false
+	if strings.TrimSpace(statusOut) != "" {
+		if _, stderr, err := p.run(ctx, req.RepoDir, "commit", "-m", req.CommitMessage); err != nil {
+			return ports.PushResult{}, fmt.Errorf("gitcli: git commit failed: %w (stderr: %s)", err, stderr)
+		}
+		commitCreated = true
 	}
 
 	hashOut, stderr, err := p.run(ctx, req.RepoDir, "rev-parse", "HEAD")
@@ -65,13 +67,46 @@ func (p *Pusher) CommitAndPush(ctx context.Context, req ports.PushRequest) (port
 
 	branchOut, stderr, err := p.run(ctx, req.RepoDir, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
-		return ports.PushResult{CommitHash: hash}, fmt.Errorf("gitcli: git rev-parse --abbrev-ref HEAD failed: %w (stderr: %s)", err, stderr)
+		return ports.PushResult{CommitCreated: commitCreated, CommitHash: hash}, fmt.Errorf("gitcli: git rev-parse --abbrev-ref HEAD failed: %w (stderr: %s)", err, stderr)
 	}
 	branch := strings.TrimSpace(branchOut)
 
-	if _, stderr, err := p.run(ctx, req.RepoDir, "push", "origin", branch); err != nil {
-		return ports.PushResult{CommitHash: hash}, fmt.Errorf("gitcli: git push origin %s failed: %w (stderr: %s)", branch, err, stderr)
+	if !commitCreated {
+		// A clean working tree does not mean there is nothing to push: the
+		// Dev agent may have already committed its own work directly via
+		// Bash (normal practice - its prompt asks for atomic commits),
+		// leaving HEAD ahead of the remote-tracking branch with nothing
+		// left in the working tree for `git add`/`git commit` to see.
+		// Without this check those commits would sit locally forever.
+		ahead, aheadErr := p.commitsAhead(ctx, req.RepoDir, branch)
+		if aheadErr != nil {
+			// Can't tell (e.g. this branch has no remote-tracking ref yet,
+			// so origin/<branch> doesn't resolve) - fall through and let
+			// the push below settle it for real rather than silently
+			// skipping.
+			ahead = 1
+		}
+		if ahead == 0 {
+			return ports.PushResult{CommitHash: hash}, nil
+		}
 	}
 
-	return ports.PushResult{Pushed: true, CommitHash: hash}, nil
+	if _, stderr, err := p.run(ctx, req.RepoDir, "push", "origin", branch); err != nil {
+		return ports.PushResult{CommitCreated: commitCreated, CommitHash: hash}, fmt.Errorf("gitcli: git push origin %s failed: %w (stderr: %s)", branch, err, stderr)
+	}
+
+	return ports.PushResult{Pushed: true, CommitCreated: commitCreated, CommitHash: hash}, nil
+}
+
+// commitsAhead reports how many commits HEAD is ahead of origin/branch.
+func (p *Pusher) commitsAhead(ctx context.Context, dir, branch string) (int, error) {
+	out, stderr, err := p.run(ctx, dir, "rev-list", "--count", fmt.Sprintf("origin/%s..HEAD", branch))
+	if err != nil {
+		return 0, fmt.Errorf("gitcli: git rev-list --count origin/%s..HEAD failed: %w (stderr: %s)", branch, err, stderr)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0, fmt.Errorf("gitcli: parsing rev-list count %q: %w", out, err)
+	}
+	return n, nil
 }

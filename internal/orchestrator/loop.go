@@ -620,8 +620,8 @@ func formatPushHistory(res ports.PushResult, err error, now time.Time) string {
 	if err != nil {
 		return fmt.Sprintf("## %s\n\n- push: FAILED\n- error: %v\n\n", now.Format(time.RFC3339), err)
 	}
-	if res.Skipped {
-		return fmt.Sprintf("## %s\n\n- push: skipped (no changes to commit)\n\n", now.Format(time.RFC3339))
+	if !res.Pushed {
+		return fmt.Sprintf("## %s\n\n- push: skipped (nothing to commit or push)\n\n", now.Format(time.RFC3339))
 	}
 	return fmt.Sprintf("## %s\n\n- push: pushed commit %s\n\n", now.Format(time.RFC3339), res.CommitHash)
 }
@@ -721,10 +721,10 @@ func writeDebugPushLog(taskID string, res ports.PushResult, pushErr error, now t
 	switch {
 	case pushErr != nil:
 		outcome = fmt.Sprintf("ERROR: %v", pushErr)
-	case res.Skipped:
-		outcome = "SKIPPED (no changes to commit)"
 	case res.Pushed:
-		outcome = fmt.Sprintf("PUSHED commit %s", res.CommitHash)
+		outcome = fmt.Sprintf("PUSHED commit %s (commit_created=%v)", res.CommitHash, res.CommitCreated)
+	case !res.Pushed && !res.CommitCreated:
+		outcome = "SKIPPED (nothing to commit or push)"
 	default:
 		outcome = fmt.Sprintf("UNEXPECTED result: %+v", res)
 	}

@@ -1,7 +1,7 @@
 <!--
   Este arquivo é preenchido apenas por um humano, antes do primeiro ciclo do
   orchestrator. Copie este template para <ORCH_DATA_DIR>/vision.md e edite
-  as seções abaixo para o projeto alvo (ex: pdf-reader). O orchestrator lê
+  as seções abaixo para o projeto alvo (ex: elo.ai). O orchestrator lê
   este arquivo em TODA chamada ao PO — ele é a fonte de verdade sobre o que
   construir e quando parar.
 -->

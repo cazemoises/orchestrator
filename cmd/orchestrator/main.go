@@ -24,8 +24,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	repoDir := envOr("ORCH_REPO_DIR", ".")
-	dataDir := envOr("ORCH_DATA_DIR", "./data")
+	// Default to the sibling elo.ai clone so a fresh checkout of the
+	// orchestrator continues the intended product instead of itself.
+	repoDir := envOr("ORCH_REPO_DIR", "..\\elo-ai")
+	dataDir := envOr("ORCH_DATA_DIR", ".\\data-elo-ai")
 
 	cfg := orchestrator.Config{
 		RepoDir:            repoDir,
