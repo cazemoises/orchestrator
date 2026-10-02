@@ -1,0 +1,29 @@
+[
+  {
+    "id": "task-001",
+    "title": "Dominio: entidades Player, Zombie, Room, Character",
+    "description": "Definir as entidades core em backend/internal/domain, sem nenhuma dependencia externa. Player (ID, nome, posicao x/y, vida, personagem escolhido), Zombie (ID, posicao x/y, vida, alvo atual - referencia a um Player), Room (codigo curto identificador, lista de players, lista de zombies, numero da onda atual, estado: waiting/playing/ended), Character (enum dos 3 personagens jogaveis com uma habilidade unica cada - definicao inicial simples, ex: velocidade/vida/dano diferenciados). Testes unitarios das regras de validacao basicas (ex: vida nao pode ser negativa, nome obrigatorio). Sem rede, sem persistencia - so o dominio puro.",
+    "status": "done",
+    "attempts": 0,
+    "created_at": "2026-08-24T00:00:00Z",
+    "updated_at": "2026-08-27T10:58:02.7064189-03:00"
+  },
+  {
+    "id": "task-002",
+    "title": "WebSocket: conexao, salas em memoria, e relay basico entre clientes",
+    "description": "Em backend/internal/adapters/websocket, usando github.com/coder/websocket: endpoint que aceita conexao WebSocket em /ws/rooms/{code}, associa o cliente a uma sala em memoria (map thread-safe, criando a sala se o codigo nao existir ainda), e retransmite qualquer mensagem recebida de um cliente para todos os outros clientes conectados na mesma sala (broadcast simples, sem interpretar o conteudo da mensagem ainda - isso e so a fundacao de rede). Cobrir com teste de integracao real (subir o servidor de teste, conectar 2+ clientes WebSocket de verdade via httptest, confirmar que uma mensagem enviada por um chega nos outros).",
+    "status": "done",
+    "attempts": 0,
+    "created_at": "2026-08-24T00:00:00Z",
+    "updated_at": "2026-08-27T15:59:29.0237154-03:00"
+  },
+  {
+    "id": "task-003",
+    "title": "Protocolo JOIN via WebSocket: ligar clientes de rede a domain.Player e domain.Room",
+    "description": "Definir e implementar um protocolo de mensagem minimo em JSON sobre o WebSocket existente em /ws/rooms/{code}: a primeira mensagem que um cliente envia apos conectar deve ser um JOIN com nome e personagem escolhido; o servidor valida esses dados criando um domain.Player (via domain.NewPlayer), adiciona esse player ao domain.Room correspondente (via Room.AddPlayer), responde ao cliente que entrou com um snapshot do estado da sala (codigo, wave, state, lista de players), e notifica os demais clientes ja conectados na sala sobre o novo jogador. Ao desconectar, o servidor deve remover o player do domain.Room (Room.RemovePlayer) e notificar os clientes restantes. Isso substitui a checagem de sala cheia baseada em contagem crua de conexoes (len(clients) \u003e= MaxPlayersPerRoom em Hub.Join) pela checagem autoritativa do dominio (Room.AddPlayer / ErrRoomFull), fechando a lacuna descrita no estado atual do projeto: hoje o relay de WebSocket nao tem nenhuma ligacao com os objetos de dominio Player/Room ja testados.",
+    "status": "in_progress",
+    "attempts": 0,
+    "created_at": "2026-08-27T16:18:56.5401853-03:00",
+    "updated_at": "2026-08-27T16:18:56.5401853-03:00"
+  }
+]

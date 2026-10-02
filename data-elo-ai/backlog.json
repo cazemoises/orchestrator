@@ -1,0 +1,92 @@
+[
+  {
+    "id": "TASK-001",
+    "title": "Commit o trabalho já implementado de logging estruturado (slog) em commits atômicos",
+    "description": "Existe uma feature completa e testada de observabilidade sentada sem commit na working tree: logging estruturado via log/slog substituindo as linhas ad hoc [llm-trace], um middleware de request logging em internal/api, um pacote internal/reqctx para correlação de request id, suporte a LOG_LEVEL=debug em cmd/api, e a migração dos adapters (gemini, ollama, llmfallback) de log.Printf para slog. `go build ./...`, `go vet ./...` e `go test ./...` já passam limpos com o estado atual. A tarefa é revisar, organizar em commits atômicos coerentes com o histórico do projeto e finalizar essa entrega — sem reescrever a lógica, que já está pronta e correta.",
+    "status": "done",
+    "attempts": 0,
+    "created_at": "2026-09-07T22:22:38.2333736-03:00",
+    "updated_at": "2026-09-07T22:29:37.5123965-03:00"
+  },
+  {
+    "id": "TASK-002",
+    "title": "Adicionar CI (GitHub Actions) que roda build+vet+test do backend e build+test do frontend em push/PR para main",
+    "description": "Fechar a lacuna de CI identificada durante a TASK-001: o commit 0c0c93c (19/07/2026), já em main, referenciava internal/api/api.go:identityLoggingAuthenticator antes de esse tipo existir (só foi definido em a04689b, 07/09/2026) — ou seja, main ficou com `go build ./...` quebrado por ~7 semanas sem que ninguém notasse, porque não existe nenhum workflow de CI no repositório (confirmado: não há diretório .github). A tarefa é adicionar um workflow de GitHub Actions que rode automaticamente em push e pull_request para main: (1) job Go — `go build ./...`, `go vet ./...`, `go test ./...`; (2) job frontend — dentro de web/, `npm ci`, `npm run build` (o typecheck real do projeto, via tsc -b — `tsc --noEmit` sozinho não pega nada aqui), `npm test` (vitest run). Critério de aceite: o workflow existe, roda as 4 verificações acima, e o Desenvolvedor comprova localmente (rodando os mesmos comandos que o workflow vai rodar) que tudo passa limpo no HEAD atual antes de commitar — para não introduzir um workflow que já nasce vermelho.",
+    "status": "done",
+    "attempts": 0,
+    "created_at": "2026-09-07T22:32:27.7955594-03:00",
+    "updated_at": "2026-09-07T22:40:24.9773103-03:00"
+  },
+  {
+    "id": "TASK-003",
+    "title": "Implementar Material Ingestion + Retrieval (Fase 3): ingestão de material, chunking, embeddings via Gemini em pgvector, e retrieval usado no Copilot — fecha o TODO(curriculum)",
+    "description": "Professores fazem upload de material (texto/Markdown); o conteúdo é dividido em chunks, embeddado via Gemini (gemini-embedding-001, 768 dims) em pgvector, e a geração de plano de aula do Copiloto passa a recuperar os chunks mais relevantes do tenant para o prompt. Isso fecha o `TODO(curriculum)` em `internal/core/copilot/copilot.go:102` e é a peça fundacional que falta para o Tutor Adaptativo (hoje inexistente no código: não há `internal/core/material`, nem `port.Retriever`/`port.Embedder`, nem tabelas `course_material`/`material_chunk` — só existe o documento de design). Critério de aceite: plano `docs/superpowers/plans/2026-07-09-material-ingestion-retrieval.md` executado task a task (ou o máximo dele que couber nesta sessão, com um STATUS.md deixando o restante claramente mapeado para a próxima sessão), com testes escritos antes da implementação (RED antes de GREEN), commits atômicos por task, `go build/vet/test` e `npm run build/test` limpos a cada commit (o CI em `.github/workflows/ci.yml` vai rodar essas 4 checagens em cada push/PR para main — não deixe main quebrar), e isolamento estrito de tenant (RLS) coberto por teste em qualquer busca vetorial nova.",
+    "status": "done",
+    "attempts": 0,
+    "created_at": "2026-09-07T22:46:03.5551608-03:00",
+    "updated_at": "2026-09-08T01:11:48.4134891-03:00"
+  },
+  {
+    "id": "TASK-004",
+    "title": "Projetar o Tutor Adaptativo restrito ao material do tenant (Fase 4): brainstorming + design doc + plano de implementação em tasks pequenas",
+    "description": "Diferente das fases anteriores (Copiloto, geração de slides/exercícios, ingestão de material), o Tutor Adaptativo não tem NENHUMA linha de código hoje: não existe `ConsentRecord`, não existe `AdaptiveRule`/`SkillProfile`, não existe endpoint de Q\u0026A do aluno, e não existe nenhum plano em docs/superpowers/plans/ para ele (confirmado por grep no repo). O SPEC.md (§7, 'Open questions') já registra como não resolvido: 'Content/safety policy for Tutor responses (what to do when the student asks something outside the material or sensitive) — needs its own specification'. Diferente de TASK-003, que já tinha plano e design doc prontos de sessão anterior para simplesmente executar, aqui a task é produzir esse design e plano primeiro — não implementar a feature inteira às cegas. Critério de aceite: (1) um design doc novo em docs/superpowers/specs/ decidindo, de forma concreta e mínima, a política de conteúdo/segurança do Tutor quando a pergunta do aluno foge do material do tenant, o escopo exato da Fase 4a (Q\u0026A restrito via RAG, reaproveitando port.Retriever/port.Embedder já existentes) versus o que fica para fases futuras (motor de regras adaptativas ADR-004 com AdaptiveRule/SkillProfile, e gate de consentimento ADR-007 com ConsentRecord — ambos inexistentes hoje e não triviais), e como cada peça se encaixa nos ADRs existentes (especialmente ADR-002 RLS, ADR-004, ADR-006, ADR-007); (2) um plano de implementação novo em docs/superpowers/plans/ quebrado em tasks pequenas e sequenciáveis (no mesmo padrão granular dos planos existentes, ex: docs/superpowers/plans/2026-07-09-material-ingestion-retrieval.md), cada uma pequena o bastante para virar uma task de backlog independente depois; (3) atualização da linha correspondente em SPEC.md §7 (e SPEC.pt-BR.md) refletindo a decisão tomada, não deixando a questão aberta como estava.",
+    "status": "done",
+    "attempts": 0,
+    "created_at": "2026-09-08T01:13:55.2789846-03:00",
+    "updated_at": "2026-09-08T05:34:58.3441091-03:00"
+  },
+  {
+    "id": "TASK-005",
+    "title": "Implementar Tutor Adaptativo Fase 4a: Q\u0026A restrito ao material do tenant (migrations, ator duplo, consent, safety filter, endpoint, teste e2e)",
+    "description": "Executar as Tasks 1–8 do plano `docs/superpowers/plans/2026-09-08-tutor-adaptive.md` (Fase 4a), que implementam o endpoint de Q\u0026A do Tutor Adaptativo restrito ao material do tenant: (1) migrations 000024 (student_session.student_user_id) e 000025 (ai_interaction com ator duplo user_id/student_session_id, CHECK exatamente-um-preenchido); (2) portas para o par de ator, ConsentRecord/ConsentChecker; (3) validação de ator em llm.Service + AIInteractionRecorder; (4) internal/core/consent (gate ADR-007) + repositório Postgres; (5) internal/core/tutor/safety (filtro de tópicos sensíveis por regra, sem LLM); (6) internal/core/tutor.Service.Ask (orquestração consent→safety→retrieval→geração); (7) endpoint POST /v1/tutor/ask; (8) teste de integração ponta-a-ponta contra Postgres real cobrindo consentimento, filtro de segurança, RAG e isolamento cross-tenant. Critério de aceite: as 8 tasks do plano implementadas (ou o máximo que couber na sessão, com STATUS.md mapeando claramente o restante), TDD RED-antes-GREEN em cada etapa comportamental, commits atômicos por task (mensagens já sugeridas no plano), go build/vet/test e npm run build/test limpos a cada commit, isolamento de tenant (RLS) coberto por teste no caso cross-tenant do Task 8, e nenhuma chamada ao provedor de LLM feita quando a pergunta é bloqueada por falta de consentimento, ausência de material ou tópico sensível.",
+    "status": "done",
+    "attempts": 0,
+    "created_at": "2026-09-08T05:36:21.152893-03:00",
+    "updated_at": "2026-09-08T16:01:43.1225597-03:00"
+  },
+  {
+    "id": "TASK-006",
+    "title": "Implementar motor adaptativo Fase 4b (ADR-004): skill_profile, adaptive_rule, adaptive_decision, recompute, rule engine e wiring no attempt",
+    "description": "Executar as Tasks 9-13 do plano `docs/superpowers/plans/2026-09-08-tutor-adaptive.md` (Fase 4b), que implementam o motor adaptativo do Tutor: (9) migrations 000026 (skill_profile), 000027 (adaptive_rule), 000028 (adaptive_decision), com RLS em todas; (10) portas `SkillProfile`/`AdaptiveRule`/`AdaptiveDecision` + repositórios; (11) `internal/core/adaptive.Recompute` — deriva SkillProfile a partir do histórico de Attempt (puro, determinístico, sem RL); (12) `internal/core/adaptive.Evaluate` — motor de regras versionadas, sem machine learning, primeira regra ativa que casa vence; (13) wiring no handler existente `POST /v1/exercises/{id}/answer` (`internal/api/api.go:handleAnswerExercise`, linha ~1274): sessões com `student_user_id` setado recomputam o SkillProfile e avaliam regras na mesma transação do attempt; sessões anônimas não tocam nenhuma das três novas dependências. Critério de aceite: as 5 tasks implementadas (ou o máximo que couber, com STATUS.md mapeando o resto), TDD RED-antes-GREEN em cada peça comportamental (Recompute, Evaluate, handler), commits atômicos por task nas mensagens sugeridas no plano, go build/vet/test e npm run build/test limpos a cada commit, isolamento de tenant (RLS) coberto por teste em adaptive_rule (regra global tenant_id=NULL visível a todos, regra específica não vaza entre tenants) e teste de integração Postgres real provando a cadeia completa: 10 attempts errados de um (aluno, skill) contra uma regra semeada geram exatamente 1 linha em adaptive_decision.",
+    "status": "done",
+    "attempts": 0,
+    "created_at": "2026-09-08T16:03:07.1329414-03:00",
+    "updated_at": "2026-09-08T21:17:35.0309047-03:00"
+  },
+  {
+    "id": "TASK-007",
+    "title": "Frente 2 (temas visuais de slide) — Task 6 do plano: SlideSurface com layouts ricos por kind, paridade com o export .pptx",
+    "description": "Executar a Task 6 de `docs/superpowers/plans/2026-07-23-slide-theme-frente-2.md` (\"Per-kind rich layout components + semantic icon markers\"): criar `web/src/slides/SlideSurface.tsx` com os 7 componentes por `kind` (Cover, Objectives, Bullets, StatHighlight, TwoColumn, Timeline, Closing) e o dispatcher que porta `internal/htmlslides/templates.go` classe-a-classe para o viewer web, substituindo o `slideLines()`/`\u003carticle className=\"deck-slide\"\u003e` atual (texto plano) em `web/src/components/SlideDeckViewer.tsx` por `normalizeSlide()` + `\u003cSlideSurface\u003e`. Critério de aceite: testes estruturais (DOM/classes/ícones, não pixel) escritos antes da implementação e vermelhos antes de verdes (`SlideSurface.test.tsx`); CSS portado para `web/src/slides/slideDeckViewer.css` sob escopo `.slide-deck-viewer` (nunca `:root` ou seletor de classe genérico não-escopado, para não colidir com `index.css`); os dois testes existentes de `SlideDeckViewer.test.tsx` (banner de aviso de deck sem plano) continuam passando sem alteração de comportamento; `npm test` e `npm run build` limpos em `web/`; nenhum arquivo Go tocado (frente 2 é escopo `web/` apenas); verificação explícita de que o cascade de `@font-face` do Inter vendorizado (Task 3) não regride visualmente o Inter carregado via CDN no resto do app. Devido ao checkpoint visual bloqueante do plano original (Step 8: aprovação do Cazé antes de commitar), esta rodada NÃO deve commitar — deve implementar, verificar e deixar documentado em um STATUS.md para revisão humana antes do commit.",
+    "status": "done",
+    "attempts": 0,
+    "created_at": "2026-09-08T21:20:38.1990379-03:00",
+    "updated_at": "2026-09-09T01:39:21.3940419-03:00"
+  },
+  {
+    "id": "TASK-008",
+    "title": "Frente 2 (temas visuais de slide) — Task 7 do plano: ghost icons + composição assimétrica (side-panel no bullets, bloco 44% no stat_highlight)",
+    "description": "Executar a Task 7 de `docs/superpowers/plans/2026-07-23-slide-theme-frente-2.md` (\"Ghost icons + asymmetric composition\"): portar as regras `.ghost`/`.side-panel`/bloco-44% de `internal/htmlslides/templates.go` (linhas ~43-47, 98, 115, 132-135, 154, 215, 229) para `web/src/slides/slideDeckViewer.css`, escopadas sob `.slide-deck-viewer.slide-\u003ckind\u003e`, e renderizar o ícone-fantasma (`ghostIcon`, já calculado por `markersFor` em `web/src/slides/icons.ts` para cada `kind`) no lugar certo de cada componente em `web/src/slides/SlideSurface.tsx` (dentro de `.stat-block` antes de `.stat-value` no stat_highlight; dentro de um novo `.side-panel` no bullets; etc., seguindo o branch correspondente de `templates.go`). Critério de aceite: teste estrutural novo por `kind` (assert `data-icon` do ghost presente no container certo; `two_column` sem nenhum elemento `.ghost`, paridade com a decisão já tomada no Go) escrito e vermelho ANTES da implementação; `npm test` e `npm run build` limpos em `web/`; nenhum arquivo Go tocado (frente 2 é escopo `web/`); devido ao checkpoint visual bloqueante do plano original (Step 5: aprovação do Cazé antes de commitar, incluindo a pergunta explícita se a composição deve ficar fixed-width/scroll ou reflow em larguras de browser), esta rodada NÃO deve commitar — implementar, verificar, e deixar documentado um STATUS.md (mesmo padrão usado e já aprovado na Task 6/TASK-007) para revisão humana antes do commit.",
+    "status": "done",
+    "attempts": 0,
+    "created_at": "2026-09-09T01:44:32.8713078-03:00",
+    "updated_at": "2026-09-09T01:55:00.1908588-03:00"
+  },
+  {
+    "id": "TASK-009",
+    "title": "Consentimento LGPD (ADR-007): lado de escrita — Grant/Revoke de ConsentRecord + endpoints, fechando o gap que impede o Tutor de ser usável ponta-a-ponta",
+    "description": "Hoje `port.ConsentChecker` (internal/core/port/consent.go) só tem `HasActiveConsent` (leitura). Não existe NENHUMA forma de conceder ou revogar consentimento através do produto — a única forma de popular `consent_record` é um INSERT manual direto no banco, usado apenas em testes (ver `grantConsent` em internal/api/tutor_test.go:422 e `internal/adapter/postgres/consent_record_test.go`). Isso significa que o endpoint `POST /v1/tutor/ask`, embora completo e testado, é inatingível na prática por qualquer aluno menor de idade real, porque não há como um responsável (`guardian`) registrar consentimento pelo produto. Implementar o lado de escrita: `Grant` e `Revoke` no port e no adapter Postgres, mais os endpoints HTTP correspondentes, respeitando a tabela append-only já existente (migration 000003, trigger que bloqueia UPDATE/DELETE).",
+    "status": "done",
+    "attempts": 0,
+    "created_at": "2026-09-09T01:59:19.28846-03:00",
+    "updated_at": "2026-09-09T02:11:32.5958769-03:00"
+  },
+  {
+    "id": "TASK-010",
+    "title": "Frente 2 (temas visuais de slide) — Task 8 do plano: overflow clamps (-webkit-line-clamp) + verificação do fixture de pior caso",
+    "description": "Executar a Task 8 de `docs/superpowers/plans/2026-07-23-slide-theme-frente-2.md` (\"Overflow clamps + worst-case fixture check\"): portar para `web/src/slides/slideDeckViewer.css` as regras de `-webkit-line-clamp` (multi-linha) de `internal/htmlslides/templates.go` que ainda faltam no viewer web — hoje o CSS só tem os `text-overflow: ellipsis` de uma linha (kicker, chip da capa, cta do closing), e o próprio arquivo tem um comentário (linhas 34-35) dizendo explicitamente que o clamp de overflow ficou para esta task. Critério de aceite: valores de clamp portados 1:1 do Go (mesmos números, já aprovados por Cazé na Frente 1c), `npm test`/`npm run build` limpos, verificação manual do fixture de pior caso em `/__slide-preview`, nenhum arquivo Go tocado, e — por causa do checkpoint visual bloqueante do próprio plano (Step 4) — NÃO commitar: implementar, verificar, documentar em STATUS.md para revisão humana antes do commit (mesmo padrão já usado e aprovado nas Tasks 6/7, TASK-007/TASK-008).",
+    "status": "in_progress",
+    "attempts": 0,
+    "created_at": "2026-09-09T02:17:55.858864-03:00",
+    "updated_at": "2026-09-09T02:17:55.858864-03:00"
+  }
+]
